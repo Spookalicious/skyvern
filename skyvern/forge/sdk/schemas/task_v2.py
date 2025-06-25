@@ -4,8 +4,9 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from skyvern.forge.sdk.core.validators import validate_url
-from skyvern.forge.sdk.schemas.tasks import ProxyLocation
+from skyvern.config import settings
+from skyvern.schemas.runs import ProxyLocation
+from skyvern.utils.url_validators import validate_url
 
 DEFAULT_WORKFLOW_TITLE = "New Workflow"
 
@@ -29,7 +30,7 @@ class TaskV2(BaseModel):
 
     observer_cruise_id: str = Field(alias="task_id")
     status: TaskV2Status
-    organization_id: str | None = None
+    organization_id: str
     workflow_run_id: str | None = None
     workflow_id: str | None = None
     workflow_permanent_id: str | None = None
@@ -41,9 +42,35 @@ class TaskV2(BaseModel):
     totp_identifier: str | None = None
     proxy_location: ProxyLocation | None = None
     webhook_callback_url: str | None = None
+    extracted_information_schema: dict | list | str | None = None
+    error_code_mapping: dict | None = None
+    model: dict[str, Any] | None = None
+    queued_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    max_screenshot_scrolling_times: int | None = None
+    extra_http_headers: dict[str, str] | None = None
 
     created_at: datetime
     modified_at: datetime
+
+    @property
+    def llm_key(self) -> str | None:
+        """
+        If the `TaskV2` has a `model` defined, then return the mapped llm_key for it.
+
+        Otherwise return `None`.
+        """
+
+        if self.model:
+            model_name = self.model.get("model_name")
+            if model_name:
+                mapping = settings.get_model_name_to_llm_key()
+                llm_key = mapping.get(model_name, {}).get("llm_key")
+                if llm_key:
+                    return llm_key
+
+        return None
 
     @field_validator("url", "webhook_callback_url", "totp_verification_url")
     @classmethod
@@ -59,11 +86,13 @@ class ThoughtType(StrEnum):
     metadata = "metadata"
     user_goal_check = "user_goal_check"
     internal_plan = "internal_plan"
+    failure_describe = "failure_describe"
 
 
 class ThoughtScenario(StrEnum):
     generate_plan = "generate_plan"
     user_goal_check = "user_goal_check"
+    failure_describe = "failure_describe"
     summarization = "summarization"
     generate_metadata = "generate_metadata"
     extract_loop_values = "extract_loop_values"
@@ -76,7 +105,7 @@ class Thought(BaseModel):
 
     observer_thought_id: str = Field(alias="thought_id")
     observer_cruise_id: str = Field(alias="task_id")
-    organization_id: str | None = None
+    organization_id: str
     workflow_run_id: str | None = None
     workflow_run_block_id: str | None = None
     workflow_id: str | None = None
@@ -90,6 +119,8 @@ class Thought(BaseModel):
     output: dict[str, Any] | None = None
     input_token_count: int | None = None
     output_token_count: int | None = None
+    reasoning_token_count: int | None = None
+    cached_token_count: int | None = None
     thought_cost: float | None = None
 
     created_at: datetime
@@ -117,6 +148,10 @@ class TaskV2Request(BaseModel):
     totp_identifier: str | None = None
     proxy_location: ProxyLocation | None = None
     publish_workflow: bool = False
+    extracted_information_schema: dict | list | str | None = None
+    error_code_mapping: dict[str, str] | None = None
+    max_screenshot_scrolling_times: int | None = None
+    extra_http_headers: dict[str, str] | None = None
 
     @field_validator("url", "webhook_callback_url", "totp_verification_url")
     @classmethod

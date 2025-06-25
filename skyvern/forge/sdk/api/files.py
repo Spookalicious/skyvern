@@ -7,16 +7,18 @@ import shutil
 import tempfile
 import zipfile
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qsl, unquote, urlparse
 
 import aiohttp
 import structlog
 from multidict import CIMultiDictProxy
+from yarl import URL
 
 from skyvern.config import settings
 from skyvern.constants import BROWSER_DOWNLOAD_TIMEOUT, BROWSER_DOWNLOADING_SUFFIX, REPO_ROOT_DIR
 from skyvern.exceptions import DownloadFileMaxSizeExceeded, DownloadFileMaxWaitingTime
 from skyvern.forge.sdk.api.aws import AsyncAWSClient
+from skyvern.utils.url_validators import encode_url
 
 LOG = structlog.get_logger()
 
@@ -83,7 +85,8 @@ async def download_file(url: str, max_size_mb: int | None = None) -> str:
 
         async with aiohttp.ClientSession(raise_for_status=True) as session:
             LOG.info("Starting to download file", url=url)
-            async with session.get(url) as response:
+            encoded_url = encode_url(url)
+            async with session.get(URL(encoded_url, encoded=True)) as response:
                 # Check the content length if available
                 if max_size_mb and response.content_length and response.content_length > max_size_mb * 1024 * 1024:
                     # todo: move to root exception.py
@@ -95,7 +98,16 @@ async def download_file(url: str, max_size_mb: int | None = None) -> str:
                 # Get the file name
                 temp_dir = make_temp_directory(prefix="skyvern_downloads_")
 
+                # Check for download parameter in Supabase URLs
                 file_name = os.path.basename(a.path)
+                if "supabase.co" in a.netloc.lower():
+                    query_params = dict(parse_qsl(a.query))
+                    if "download" in query_params:
+                        file_name = query_params["download"]
+                    else:
+                        file_name = os.path.basename(a.path)
+                file_name = sanitize_filename(file_name)
+
                 # if no suffix in the URL, we need to parse it from HTTP headers
                 if not Path(file_name).suffix:
                     LOG.info("No file extension detected, trying to retrieve it from HTTP headers")
@@ -226,9 +238,7 @@ def calculate_sha256_for_file(file_path: str) -> str:
 
 def create_folder_if_not_exist(dir: str) -> None:
     path = Path(dir)
-    if path.exists():
-        return
-    path.mkdir(parents=True)
+    path.mkdir(parents=True, exist_ok=True)
 
 
 def get_skyvern_temp_dir() -> str:

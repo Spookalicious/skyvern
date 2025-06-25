@@ -67,8 +67,9 @@ class WaitBlockParametersItem_BitwardenLoginCredential(UniversalBaseModel):
     bitwarden_client_id_aws_secret_key: str
     bitwarden_client_secret_aws_secret_key: str
     bitwarden_master_password_aws_secret_key: str
-    url_parameter_key: str
+    url_parameter_key: typing.Optional[str] = None
     bitwarden_collection_id: typing.Optional[str] = None
+    bitwarden_item_id: typing.Optional[str] = None
     created_at: dt.datetime
     modified_at: dt.datetime
     deleted_at: typing.Optional[dt.datetime] = None
@@ -130,6 +131,27 @@ from .context_parameter import ContextParameter  # noqa: E402
 from .context_parameter_source import ContextParameterSource  # noqa: E402
 
 
+class WaitBlockParametersItem_Credential(UniversalBaseModel):
+    parameter_type: typing.Literal["credential"] = "credential"
+    key: str
+    description: typing.Optional[str] = None
+    credential_parameter_id: str
+    workflow_id: str
+    credential_id: str
+    created_at: dt.datetime
+    modified_at: dt.datetime
+    deleted_at: typing.Optional[dt.datetime] = None
+
+    if IS_PYDANTIC_V2:
+        model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(extra="allow", frozen=True)  # type: ignore # Pydantic v2
+    else:
+
+        class Config:
+            frozen = True
+            smart_union = True
+            extra = pydantic.Extra.allow
+
+
 class WaitBlockParametersItem_Output(UniversalBaseModel):
     parameter_type: typing.Literal["output"] = "output"
     key: str
@@ -178,8 +200,8 @@ WaitBlockParametersItem = typing.Union[
     WaitBlockParametersItem_BitwardenLoginCredential,
     WaitBlockParametersItem_BitwardenSensitiveInformation,
     WaitBlockParametersItem_Context,
+    WaitBlockParametersItem_Credential,
     WaitBlockParametersItem_Output,
     WaitBlockParametersItem_Workflow,
 ]
-update_forward_refs(ContextParameter, WaitBlockParametersItem_Context=WaitBlockParametersItem_Context)
 update_forward_refs(WaitBlockParametersItem_Context)

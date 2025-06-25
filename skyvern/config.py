@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     ADDITIONAL_MODULES: list[str] = []
 
     BROWSER_TYPE: str = "chromium-headful"
+    BROWSER_REMOTE_DEBUGGING_URL: str = "http://127.0.0.1:9222"
+    CHROME_EXECUTABLE_PATH: str | None = None
     MAX_SCRAPING_RETRIES: int = 0
     VIDEO_PATH: str | None = "./video"
     HAR_PATH: str | None = "./har"
@@ -17,7 +19,7 @@ class Settings(BaseSettings):
     TEMP_PATH: str = "./temp"
     BROWSER_ACTION_TIMEOUT_MS: int = 5000
     BROWSER_SCREENSHOT_TIMEOUT_MS: int = 20000
-    BROWSER_LOADING_TIMEOUT_MS: int = 120000
+    BROWSER_LOADING_TIMEOUT_MS: int = 90000
     OPTION_LOADING_TIMEOUT_MS: int = 600000
     MAX_STEPS_PER_RUN: int = 10
     MAX_STEPS_PER_TASK_V2: int = 25
@@ -30,25 +32,29 @@ class Settings(BaseSettings):
     DEBUG_MODE: bool = False
     DATABASE_STRING: str = "postgresql+psycopg://skyvern@localhost/skyvern"
     DATABASE_STATEMENT_TIMEOUT_MS: int = 60000
+    DISABLE_CONNECTION_POOL: bool = False
     PROMPT_ACTION_HISTORY_WINDOW: int = 1
     TASK_RESPONSE_ACTION_SCREENSHOT_COUNT: int = 3
 
     ENV: str = "local"
     EXECUTE_ALL_STEPS: bool = True
     JSON_LOGGING: bool = False
+    LOG_RAW_API_REQUESTS: bool = True
     LOG_LEVEL: str = "INFO"
     PORT: int = 8000
     ALLOWED_ORIGINS: list[str] = ["*"]
     BLOCKED_HOSTS: list[str] = ["localhost"]
     ALLOWED_HOSTS: list[str] = []
 
+    # Format: "http://<username>:<password>@host:port, http://<username>:<password>@host:port, ...."
+    HOSTED_PROXY_POOL: str = ""
+    ENABLE_PROXY: bool = False
+
     # Secret key for JWT. Please generate your own secret key in production
     SECRET_KEY: str = "PLACEHOLDER"
     # Algorithm used to sign the JWT
     SIGNATURE_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # one week
-
-    SKYVERN_API_KEY: str = "PLACEHOLDER"
 
     # Artifact storage settings
     ARTIFACT_STORAGE_PATH: str = f"{SKYVERN_DIR}/artifacts"
@@ -74,6 +80,11 @@ class Settings(BaseSettings):
     BROWSER_TIMEZONE: str = "America/New_York"
     BROWSER_WIDTH: int = 1920
     BROWSER_HEIGHT: int = 1080
+    BROWSER_POLICY_FILE: str = "/etc/chromium/policies/managed/policies.json"
+
+    # Add extension folders name here to load extension in your browser
+    EXTENSIONS_BASE_PATH: str = "./extensions"
+    EXTENSIONS: list[str] = []
 
     # Workflow constant parameters
     WORKFLOW_DOWNLOAD_DIRECTORY_PARAMETER_KEY: str = "SKYVERN_DOWNLOAD_DIRECTORY"
@@ -95,7 +106,8 @@ class Settings(BaseSettings):
     # LLM Configuration #
     #####################
     # ACTIVE LLM PROVIDER
-    LLM_KEY: str = "OPENAI_GPT4O"
+    LLM_KEY: str = "OPENAI_GPT4O"  # This is the model name
+    LLM_API_KEY: str | None = None  # API key for the model
     SECONDARY_LLM_KEY: str | None = None
     SELECT_AGENT_LLM_KEY: str | None = None
     SINGLE_CLICK_AGENT_LLM_KEY: str | None = None
@@ -104,23 +116,53 @@ class Settings(BaseSettings):
     LLM_CONFIG_TIMEOUT: int = 300
     LLM_CONFIG_MAX_TOKENS: int = 4096
     LLM_CONFIG_TEMPERATURE: float = 0
+    LLM_CONFIG_SUPPORT_VISION: bool = True  # Whether the model supports vision
+    LLM_CONFIG_ADD_ASSISTANT_PREFIX: bool = False  # Whether to add assistant prefix
     # LLM PROVIDER SPECIFIC
     ENABLE_OPENAI: bool = False
     ENABLE_ANTHROPIC: bool = False
+    ENABLE_BEDROCK_ANTHROPIC: bool = False
     ENABLE_AZURE: bool = False
     ENABLE_AZURE_GPT4O_MINI: bool = False
     ENABLE_AZURE_O3_MINI: bool = False
     ENABLE_BEDROCK: bool = False
     ENABLE_GEMINI: bool = False
+    ENABLE_VERTEX_AI: bool = False
+    ENABLE_AZURE_CUA: bool = False
+    ENABLE_OPENAI_COMPATIBLE: bool = False
     # OPENAI
     OPENAI_API_KEY: str | None = None
     # ANTHROPIC
     ANTHROPIC_API_KEY: str | None = None
+    ANTHROPIC_CUA_LLM_KEY: str = "ANTHROPIC_CLAUDE3.7_SONNET"
+
+    # VOLCENGINE (Doubao)
+    ENABLE_VOLCENGINE: bool = False
+    VOLCENGINE_API_KEY: str | None = None
+    VOLCENGINE_API_BASE: str = "https://ark.cn-beijing.volces.com/api/v3"
+    VOLCENGINE_CUA_LLM_KEY: str = "VOLCENGINE_DOUBAO_1_5_THINKING_VISION_PRO"
+
+    # OPENAI COMPATIBLE
+    OPENAI_COMPATIBLE_MODEL_NAME: str | None = None
+    OPENAI_COMPATIBLE_API_KEY: str | None = None
+    OPENAI_COMPATIBLE_API_BASE: str | None = None
+    OPENAI_COMPATIBLE_API_VERSION: str | None = None
+    OPENAI_COMPATIBLE_MAX_TOKENS: int | None = None
+    OPENAI_COMPATIBLE_TEMPERATURE: float | None = None
+    OPENAI_COMPATIBLE_SUPPORTS_VISION: bool = False
+    OPENAI_COMPATIBLE_ADD_ASSISTANT_PREFIX: bool = False
+    OPENAI_COMPATIBLE_MODEL_KEY: str = "OPENAI_COMPATIBLE"
+    OPENAI_COMPATIBLE_REASONING_EFFORT: str | None = None
+
     # AZURE
     AZURE_DEPLOYMENT: str | None = None
     AZURE_API_KEY: str | None = None
     AZURE_API_BASE: str | None = None
     AZURE_API_VERSION: str | None = None
+    AZURE_CUA_API_KEY: str | None = None
+    AZURE_CUA_ENDPOINT: str | None = None
+    AZURE_CUA_DEPLOYMENT: str | None = "computer-use-preview"
+    AZURE_CUA_API_VERSION: str | None = "2025-03-01-preview"
 
     # AZURE GPT-4o mini
     AZURE_GPT4O_MINI_DEPLOYMENT: str | None = None
@@ -134,13 +176,70 @@ class Settings(BaseSettings):
     AZURE_O3_MINI_API_BASE: str | None = None
     AZURE_O3_MINI_API_VERSION: str | None = None
 
+    # AZURE gpt-4.1
+    ENABLE_AZURE_GPT4_1: bool = False
+    AZURE_GPT4_1_DEPLOYMENT: str = "gpt-4.1"
+    AZURE_GPT4_1_API_KEY: str | None = None
+    AZURE_GPT4_1_API_BASE: str | None = None
+    AZURE_GPT4_1_API_VERSION: str = "2025-01-01-preview"
+
+    # AZURE gpt-4.1 mini
+    ENABLE_AZURE_GPT4_1_MINI: bool = False
+    AZURE_GPT4_1_MINI_DEPLOYMENT: str = "gpt-4.1-mini"
+    AZURE_GPT4_1_MINI_API_KEY: str | None = None
+    AZURE_GPT4_1_MINI_API_BASE: str | None = None
+    AZURE_GPT4_1_MINI_API_VERSION: str = "2025-01-01-preview"
+
+    # AZURE gpt-4.1 nano
+    ENABLE_AZURE_GPT4_1_NANO: bool = False
+    AZURE_GPT4_1_NANO_DEPLOYMENT: str = "gpt-4.1-nano"
+    AZURE_GPT4_1_NANO_API_KEY: str | None = None
+    AZURE_GPT4_1_NANO_API_BASE: str | None = None
+    AZURE_GPT4_1_NANO_API_VERSION: str = "2025-01-01-preview"
+
+    # AZURE o4-mini
+    ENABLE_AZURE_O4_MINI: bool = False
+    AZURE_O4_MINI_DEPLOYMENT: str = "o4-mini"
+    AZURE_O4_MINI_API_KEY: str | None = None
+    AZURE_O4_MINI_API_BASE: str | None = None
+    AZURE_O4_MINI_API_VERSION: str = "2025-01-01-preview"
+
+    # AZURE o3
+    ENABLE_AZURE_O3: bool = False
+    AZURE_O3_DEPLOYMENT: str = "o3"
+    AZURE_O3_API_KEY: str | None = None
+    AZURE_O3_API_BASE: str | None = None
+    AZURE_O3_API_VERSION: str = "2025-01-01-preview"
+
     # GEMINI
     GEMINI_API_KEY: str | None = None
+
+    # VERTEX_AI
+    VERTEX_CREDENTIALS: str | None = None
+    VERTEX_PROJECT_ID: str | None = None
+    VERTEX_LOCATION: str | None = None
 
     # NOVITA AI
     ENABLE_NOVITA: bool = False
     NOVITA_API_KEY: str | None = None
     NOVITA_API_VERSION: str = "v3"
+
+    # OLLAMA
+    ENABLE_OLLAMA: bool = False
+    OLLAMA_SERVER_URL: str | None = None
+    OLLAMA_MODEL: str | None = None
+
+    # OPENROUTER
+    ENABLE_OPENROUTER: bool = False
+    OPENROUTER_API_KEY: str | None = None
+    OPENROUTER_MODEL: str | None = None
+    OPENROUTER_API_BASE: str = "https://api.openrouter.ai/v1"
+
+    # GROQ
+    ENABLE_GROQ: bool = False
+    GROQ_API_KEY: str | None = None
+    GROQ_MODEL: str | None = None
+    GROQ_API_BASE: str = "https://api.groq.com/openai/v1"
 
     # TOTP Settings
     TOTP_LIFESPAN_MINUTES: int = 10
@@ -151,6 +250,7 @@ class Settings(BaseSettings):
     BITWARDEN_CLIENT_ID: str | None = None
     BITWARDEN_CLIENT_SECRET: str | None = None
     BITWARDEN_MASTER_PASSWORD: str | None = None
+    OP_SERVICE_ACCOUNT_TOKEN: str | None = None
 
     # Skyvern Auth Bitwarden Settings
     SKYVERN_AUTH_BITWARDEN_CLIENT_ID: str | None = None
@@ -165,6 +265,68 @@ class Settings(BaseSettings):
 
     ENABLE_LOG_ARTIFACTS: bool = False
     ENABLE_CODE_BLOCK: bool = False
+
+    TASK_BLOCKED_SITE_FALLBACK_URL: str = "https://www.google.com"
+
+    SKYVERN_APP_URL: str = "http://localhost:8080"
+    # SkyvernClient Settings
+    SKYVERN_BASE_URL: str = "https://api.skyvern.com"
+    SKYVERN_API_KEY: str = "PLACEHOLDER"
+
+    SKYVERN_BROWSER_VNC_PORT: int = 6080
+    """
+    The websockified port on which the VNC server of a persistent browser is
+    listening.
+    """
+
+    PYLON_IDENTITY_VERIFICATION_SECRET: str | None = None
+    """
+    The secret used to sign the email/identity of the user.
+    """
+
+    def get_model_name_to_llm_key(self) -> dict[str, dict[str, str]]:
+        """
+        Keys are model names available to blocks in the frontend. These map to key names
+        in LLMConfigRegistry._configs.
+        """
+
+        if self.is_cloud_environment():
+            return {
+                "gemini-2.5-pro-preview-05-06": {"llm_key": "VERTEX_GEMINI_2.5_PRO_PREVIEW", "label": "Gemini 2.5 Pro"},
+                "gemini-2.5-flash-preview-05-20": {
+                    "llm_key": "VERTEX_GEMINI_2.5_FLASH_PREVIEW_05_20",
+                    "label": "Gemini 2.5 Flash",
+                },
+                "azure/gpt-4.1": {"llm_key": "AZURE_OPENAI_GPT4_1", "label": "GPT 4.1"},
+                "azure/o4-mini": {"llm_key": "AZURE_OPENAI_O4_MINI", "label": "GPT O4 Mini"},
+                "us.anthropic.claude-opus-4-20250514-v1:0": {
+                    "llm_key": "BEDROCK_ANTHROPIC_CLAUDE4_OPUS_INFERENCE_PROFILE",
+                    "label": "Anthropic Claude 4 Opus",
+                },
+                "us.anthropic.claude-sonnet-4-20250514-v1:0": {
+                    "llm_key": "BEDROCK_ANTHROPIC_CLAUDE4_SONNET_INFERENCE_PROFILE",
+                    "label": "Anthropic Claude 4 Sonnet",
+                },
+            }
+        else:
+            # TODO: apparently the list for OSS is to be much larger
+            return {
+                "gemini-2.5-pro-preview-05-06": {"llm_key": "VERTEX_GEMINI_2.5_PRO_PREVIEW", "label": "Gemini 2.5 Pro"},
+                "gemini-2.5-flash-preview-05-20": {
+                    "llm_key": "VERTEX_GEMINI_2.5_FLASH_PREVIEW_05_20",
+                    "label": "Gemini 2.5 Flash",
+                },
+                "azure/gpt-4.1": {"llm_key": "AZURE_OPENAI_GPT4_1", "label": "GPT 4.1"},
+                "azure/o4-mini": {"llm_key": "AZURE_OPENAI_O4_MINI", "label": "GPT O4 Mini"},
+                "us.anthropic.claude-opus-4-20250514-v1:0": {
+                    "llm_key": "BEDROCK_ANTHROPIC_CLAUDE4_OPUS_INFERENCE_PROFILE",
+                    "label": "Anthropic Claude 4 Opus",
+                },
+                "us.anthropic.claude-sonnet-4-20250514-v1:0": {
+                    "llm_key": "BEDROCK_ANTHROPIC_CLAUDE4_SONNET_INFERENCE_PROFILE",
+                    "label": "Anthropic Claude 4 Sonnet",
+                },
+            }
 
     def is_cloud_environment(self) -> bool:
         """

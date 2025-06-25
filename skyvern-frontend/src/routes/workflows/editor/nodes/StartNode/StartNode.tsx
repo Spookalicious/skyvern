@@ -1,3 +1,4 @@
+import { getClient } from "@/api/AxiosClient";
 import { Handle, NodeProps, Position, useReactFlow } from "@xyflow/react";
 import type { StartNode } from "./types";
 import {
@@ -8,15 +9,39 @@ import {
 } from "@/components/ui/accordion";
 import { useState } from "react";
 import { ProxyLocation } from "@/api/types";
+import { useQuery } from "@tanstack/react-query";
 import { Label } from "@/components/ui/label";
 import { HelpTooltip } from "@/components/HelpTooltip";
 import { Input } from "@/components/ui/input";
 import { ProxySelector } from "@/components/ProxySelector";
+import { useCredentialGetter } from "@/hooks/useCredentialGetter";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
+import { ModelsResponse } from "@/api/types";
+import { ModelSelector } from "@/components/ModelSelector";
+import { WorkflowModel } from "@/routes/workflows/types/workflowTypes";
+import { MAX_SCREENSHOT_SCROLLING_TIMES_DEFAULT } from "../Taskv2Node/types";
+import { KeyValueInput } from "@/components/KeyValueInput";
 
 function StartNode({ id, data }: NodeProps<StartNode>) {
+  const credentialGetter = useCredentialGetter();
   const { updateNodeData } = useReactFlow();
+
+  const { data: availableModels } = useQuery<ModelsResponse>({
+    queryKey: ["models"],
+    queryFn: async () => {
+      const client = await getClient(credentialGetter);
+
+      return client.get("/models").then((res) => res.data);
+    },
+  });
+
+  const modelNames = availableModels?.models ?? {};
+  const firstKey = Object.keys(modelNames)[0];
+  const workflowModel: WorkflowModel | null = firstKey
+    ? { model_name: modelNames[firstKey] || "" }
+    : null;
+
   const [inputs, setInputs] = useState({
     webhookCallbackUrl: data.withWorkflowSettings
       ? data.webhookCallbackUrl
@@ -27,6 +52,11 @@ function StartNode({ id, data }: NodeProps<StartNode>) {
     persistBrowserSession: data.withWorkflowSettings
       ? data.persistBrowserSession
       : false,
+    model: data.withWorkflowSettings ? data.model : workflowModel,
+    maxScreenshotScrollingTimes: data.withWorkflowSettings
+      ? data.maxScreenshotScrollingTimes
+      : null,
+    extraHttpHeaders: data.withWorkflowSettings ? data.extraHttpHeaders : null,
   });
 
   function handleChange(key: string, value: unknown) {
@@ -58,6 +88,15 @@ function StartNode({ id, data }: NodeProps<StartNode>) {
                 <AccordionContent className="pl-6 pr-1 pt-1">
                   <div className="space-y-4">
                     <div className="space-y-2">
+                      <ModelSelector
+                        className="nopan w-52 text-xs"
+                        value={inputs.model}
+                        onChange={(value) => {
+                          handleChange("model", value);
+                        }}
+                      />
+                    </div>
+                    <div className="space-y-2">
                       <div className="flex gap-2">
                         <Label>Webhook Callback URL</Label>
                         <HelpTooltip content="The URL of a webhook endpoint to send the workflow results" />
@@ -87,7 +126,7 @@ function StartNode({ id, data }: NodeProps<StartNode>) {
                     </div>
                     <div className="space-y-2">
                       <div className="flex items-center gap-2">
-                        <Label>Persist Browser Session</Label>
+                        <Label>Save &amp; Reuse Session</Label>
                         <HelpTooltip content="Persist session information across workflow runs" />
                         <Switch
                           checked={inputs.persistBrowserSession}
@@ -96,6 +135,39 @@ function StartNode({ id, data }: NodeProps<StartNode>) {
                           }}
                         />
                       </div>
+                    </div>
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2">
+                        <Label>Extra HTTP Headers</Label>
+                        <HelpTooltip content="Specify some self-defined HTTP requests headers" />
+                      </div>
+                      <KeyValueInput
+                        value={inputs.extraHttpHeaders ?? null}
+                        onChange={(val) =>
+                          handleChange("extraHttpHeaders", val)
+                        }
+                        addButtonText="Add Header"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2">
+                        <Label>Max Scrolling Screenshots</Label>
+                        <HelpTooltip
+                          content={`The maximum number of times to scroll down the page to take merged screenshots after action. Default is ${MAX_SCREENSHOT_SCROLLING_TIMES_DEFAULT}. If it's set to 0, it will take the current viewport screenshot.`}
+                        />
+                      </div>
+                      <Input
+                        value={inputs.maxScreenshotScrollingTimes ?? ""}
+                        placeholder={`Default: ${MAX_SCREENSHOT_SCROLLING_TIMES_DEFAULT}`}
+                        onChange={(event) => {
+                          const value =
+                            event.target.value === ""
+                              ? null
+                              : Number(event.target.value);
+
+                          handleChange("maxScreenshotScrollingTimes", value);
+                        }}
+                      />
                     </div>
                   </div>
                 </AccordionContent>

@@ -1,6 +1,7 @@
 import time
 from typing import Annotated
 
+import structlog
 from asyncache import cached
 from cachetools import TTLCache
 from fastapi import Header, HTTPException, status
@@ -15,14 +16,21 @@ from skyvern.forge.sdk.db.client import AgentDB
 from skyvern.forge.sdk.models import TokenPayload
 from skyvern.forge.sdk.schemas.organizations import Organization, OrganizationAuthTokenType
 
+LOG = structlog.get_logger()
+
 AUTHENTICATION_TTL = 60 * 60  # one hour
 CACHE_SIZE = 128
 ALGORITHM = "HS256"
 
 
 async def get_current_org(
-    x_api_key: Annotated[str | None, Header()] = None,
-    authorization: Annotated[str | None, Header()] = None,
+    x_api_key: Annotated[
+        str | None,
+        Header(
+            description="Skyvern API key for authentication. API key can be found at https://app.skyvern.com/settings."
+        ),
+    ] = None,
+    authorization: Annotated[str | None, Header(include_in_schema=False)] = None,
 ) -> Organization:
     if not x_api_key and not authorization:
         raise HTTPException(
@@ -91,6 +99,7 @@ async def _get_current_org_cached(x_api_key: str, db: AgentDB) -> Organization:
         )
         api_key_data = TokenPayload(**payload)
     except (JWTError, ValidationError):
+        LOG.error("Error decoding JWT", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Could not validate credentials",
@@ -103,6 +112,7 @@ async def _get_current_org_cached(x_api_key: str, db: AgentDB) -> Organization:
 
     organization = await db.get_organization(organization_id=api_key_data.sub)
     if not organization:
+        LOG.warning("Organization not found", organization_id=api_key_data.sub, **payload)
         raise HTTPException(status_code=404, detail="Organization not found")
 
     # check if the token exists in the database
@@ -128,4 +138,5 @@ async def _get_current_org_cached(x_api_key: str, db: AgentDB) -> Organization:
     context = skyvern_context.current()
     if context:
         context.organization_id = organization.organization_id
+        context.organization_name = organization.organization_name
     return organization

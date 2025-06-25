@@ -1,4 +1,6 @@
+import { RunEngine } from "@/api/types";
 import { WorkflowBlockType } from "./workflowTypes";
+import { WorkflowModel } from "./workflowTypes";
 
 export type WorkflowCreateYAMLRequest = {
   title: string;
@@ -6,9 +8,12 @@ export type WorkflowCreateYAMLRequest = {
   proxy_location?: string | null;
   webhook_callback_url?: string | null;
   persist_browser_session?: boolean;
+  model?: WorkflowModel | null;
   totp_verification_url?: string | null;
   workflow_definition: WorkflowDefinitionYAML;
   is_saved_task?: boolean;
+  max_screenshot_scrolling_times?: number | null;
+  extra_http_headers?: Record<string, string> | null;
 };
 
 export type WorkflowDefinitionYAML = {
@@ -20,11 +25,12 @@ export type ParameterYAML =
   | WorkflowParameterYAML
   | BitwardenLoginCredentialParameterYAML
   | AWSSecretParameterYAML
-  | CredentialParameterYAML
+  | BitwardenSensitiveInformationParameterYAML
+  | BitwardenCreditCardDataParameterYAML
+  | OnePasswordCredentialParameterYAML
   | ContextParameterYAML
   | OutputParameterYAML
-  | BitwardenSensitiveInformationParameterYAML
-  | BitwardenCreditCardDataParameterYAML;
+  | CredentialParameterYAML;
 
 export type ParameterYAMLBase = {
   parameter_type: string;
@@ -75,6 +81,12 @@ export type BitwardenCreditCardDataParameterYAML = ParameterYAMLBase & {
   bitwarden_master_password_aws_secret_key: string;
 };
 
+export type OnePasswordCredentialParameterYAML = ParameterYAMLBase & {
+  parameter_type: "onepassword";
+  vault_id: string;
+  item_id: string;
+};
+
 export type ContextParameterYAML = ParameterYAMLBase & {
   parameter_type: "context";
   source_parameter_key: string;
@@ -95,6 +107,7 @@ export type BlockYAML =
   | TextPromptBlockYAML
   | DownloadToS3BlockYAML
   | UploadToS3BlockYAML
+  | FileUploadBlockYAML
   | SendEmailBlockYAML
   | FileUrlParserBlockYAML
   | ForLoopBlockYAML
@@ -133,6 +146,8 @@ export type TaskBlockYAML = BlockYAMLBase & {
   cache_actions: boolean;
   complete_criterion: string | null;
   terminate_criterion: string | null;
+  include_action_history_in_verification: boolean;
+  engine: RunEngine | null;
 };
 
 export type Taskv2BlockYAML = BlockYAMLBase & {
@@ -165,6 +180,7 @@ export type ActionBlockYAML = BlockYAMLBase & {
   totp_verification_url?: string | null;
   totp_identifier?: string | null;
   cache_actions: boolean;
+  engine: RunEngine | null;
 };
 
 export type NavigationBlockYAML = BlockYAMLBase & {
@@ -183,6 +199,9 @@ export type NavigationBlockYAML = BlockYAMLBase & {
   cache_actions: boolean;
   complete_criterion: string | null;
   terminate_criterion: string | null;
+  engine: RunEngine | null;
+  model: WorkflowModel | null;
+  include_action_history_in_verification: boolean;
 };
 
 export type ExtractionBlockYAML = BlockYAMLBase & {
@@ -195,6 +214,7 @@ export type ExtractionBlockYAML = BlockYAMLBase & {
   max_steps_per_run?: number | null;
   parameter_keys?: Array<string> | null;
   cache_actions: boolean;
+  engine: RunEngine | null;
 };
 
 export type LoginBlockYAML = BlockYAMLBase & {
@@ -211,6 +231,7 @@ export type LoginBlockYAML = BlockYAMLBase & {
   cache_actions: boolean;
   complete_criterion: string | null;
   terminate_criterion: string | null;
+  engine: RunEngine | null;
 };
 
 export type WaitBlockYAML = BlockYAMLBase & {
@@ -231,6 +252,7 @@ export type FileDownloadBlockYAML = BlockYAMLBase & {
   totp_verification_url?: string | null;
   totp_identifier?: string | null;
   cache_actions: boolean;
+  engine: RunEngine | null;
 };
 
 export type CodeBlockYAML = BlockYAMLBase & {
@@ -255,6 +277,16 @@ export type DownloadToS3BlockYAML = BlockYAMLBase & {
 export type UploadToS3BlockYAML = BlockYAMLBase & {
   block_type: "upload_to_s3";
   path?: string | null;
+};
+
+export type FileUploadBlockYAML = BlockYAMLBase & {
+  block_type: "file_upload";
+  path?: string | null;
+  storage_type: string;
+  s3_bucket: string;
+  region_name: string;
+  aws_access_key_id: string;
+  aws_secret_access_key: string;
 };
 
 export type SendEmailBlockYAML = BlockYAMLBase & {

@@ -1,43 +1,15 @@
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Any, Type, TypeVar
+from typing import Annotated, Any, Literal, Type, TypeVar
 
 import structlog
 from litellm import ConfigDict
 from pydantic import BaseModel, Field
 
+from skyvern.webeye.actions.action_types import ActionType
+
 LOG = structlog.get_logger()
 T = TypeVar("T", bound="Action")
-
-
-class ActionType(StrEnum):
-    CLICK = "click"
-    INPUT_TEXT = "input_text"
-    UPLOAD_FILE = "upload_file"
-
-    # This action is not used in the current implementation. Click actions are used instead."
-    DOWNLOAD_FILE = "download_file"
-
-    SELECT_OPTION = "select_option"
-    CHECKBOX = "checkbox"
-    WAIT = "wait"
-    NULL_ACTION = "null_action"
-    SOLVE_CAPTCHA = "solve_captcha"
-    TERMINATE = "terminate"
-    COMPLETE = "complete"
-    RELOAD_PAGE = "reload_page"
-
-    EXTRACT = "extract"
-
-    def is_web_action(self) -> bool:
-        return self in [
-            ActionType.CLICK,
-            ActionType.INPUT_TEXT,
-            ActionType.UPLOAD_FILE,
-            ActionType.DOWNLOAD_FILE,
-            ActionType.SELECT_OPTION,
-            ActionType.CHECKBOX,
-        ]
 
 
 class ActionStatus(StrEnum):
@@ -107,6 +79,7 @@ class Action(BaseModel):
     element_id: Annotated[str, Field(coerce_numbers_to_str=True)] | None = None
     skyvern_element_hash: str | None = None
     skyvern_element_data: dict[str, Any] | None = None
+    tool_call_id: str | None = None
 
     # DecisiveAction (CompleteAction, TerminateAction) fields
     errors: list[UserDefinedError] | None = None
@@ -159,6 +132,13 @@ class Action(BaseModel):
         else:
             raise ValueError("Invalid action data")
 
+    def get_xpath(self) -> str | None:
+        if not self.skyvern_element_data:
+            return None
+        if "xpath" in self.skyvern_element_data:
+            return self.skyvern_element_data["xpath"]
+        return None
+
 
 class WebAction(Action):
     element_id: Annotated[str, Field(coerce_numbers_to_str=True)]
@@ -177,9 +157,14 @@ class ClickAction(WebAction):
     action_type: ActionType = ActionType.CLICK
     file_url: str | None = None
     download: bool = False
+    x: int | None = None
+    y: int | None = None
+    button: str = "left"
+    # normal click: 1, double click: 2, triple click: 3
+    repeat: int = 1
 
     def __repr__(self) -> str:
-        return f"ClickAction(element_id={self.element_id}, file_url={self.file_url}, download={self.download})"
+        return f"ClickAction(element_id={self.element_id}, file_url={self.file_url}, download={self.download}, x={self.x}, y={self.y}, button={self.button}, tool_call_id={self.tool_call_id})"
 
 
 class InputTextAction(WebAction):
@@ -187,7 +172,7 @@ class InputTextAction(WebAction):
     text: str
 
     def __repr__(self) -> str:
-        return f"InputTextAction(element_id={self.element_id}, text={self.text})"
+        return f"InputTextAction(element_id={self.element_id}, text={self.text}, tool_call_id={self.tool_call_id})"
 
 
 class UploadFileAction(WebAction):
@@ -240,6 +225,7 @@ class CheckboxAction(WebAction):
 
 class WaitAction(Action):
     action_type: ActionType = ActionType.WAIT
+    seconds: int = 20
 
 
 class TerminateAction(DecisiveAction):
@@ -256,6 +242,46 @@ class ExtractAction(Action):
     action_type: ActionType = ActionType.EXTRACT
     data_extraction_goal: str | None = None
     data_extraction_schema: dict[str, Any] | None = None
+
+
+class ScrollAction(Action):
+    action_type: ActionType = ActionType.SCROLL
+    x: int | None = None
+    y: int | None = None
+    scroll_x: int
+    scroll_y: int
+
+
+class KeypressAction(Action):
+    action_type: ActionType = ActionType.KEYPRESS
+    keys: list[str] = []
+    hold: bool = False
+    duration: int = 0
+
+
+class MoveAction(Action):
+    action_type: ActionType = ActionType.MOVE
+    x: int
+    y: int
+
+
+class DragAction(Action):
+    action_type: ActionType = ActionType.DRAG
+    start_x: int | None = None
+    start_y: int | None = None
+    path: list[tuple[int, int]] = []
+
+
+class VerificationCodeAction(Action):
+    action_type: ActionType = ActionType.VERIFICATION_CODE
+    verification_code: str
+
+
+class LeftMouseAction(Action):
+    action_type: ActionType = ActionType.LEFT_MOUSE
+    direction: Literal["down", "up"]
+    x: int | None = None
+    y: int | None = None
 
 
 class ScrapeResult(BaseModel):

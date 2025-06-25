@@ -33,6 +33,8 @@ import { getAvailableOutputParameterKeys } from "../../workflowEditorUtils";
 import { ParametersMultiSelect } from "../TaskNode/ParametersMultiSelect";
 import { WorkflowDataSchemaInputGroup } from "@/components/DataSchemaInputGroup/WorkflowDataSchemaInputGroup";
 import { useIsFirstBlockInWorkflow } from "../../hooks/useIsFirstNodeInWorkflow";
+import { RunEngineSelector } from "@/components/EngineSelector";
+import { ModelSelector } from "@/components/ModelSelector";
 
 function ExtractionNode({ id, data }: NodeProps<ExtractionNode>) {
   const { updateNodeData } = useReactFlow();
@@ -45,10 +47,11 @@ function ExtractionNode({ id, data }: NodeProps<ExtractionNode>) {
     url: data.url,
     dataExtractionGoal: data.dataExtractionGoal,
     dataSchema: data.dataSchema,
-    maxRetries: data.maxRetries,
     maxStepsOverride: data.maxStepsOverride,
     continueOnFailure: data.continueOnFailure,
     cacheActions: data.cacheActions,
+    engine: data.engine,
+    model: data.model,
   });
   const deleteNodeCallback = useDeleteNodeCallback();
   const nodes = useNodes<AppNode>();
@@ -152,6 +155,13 @@ function ExtractionNode({ id, data }: NodeProps<ExtractionNode>) {
             <AccordionContent className="pl-6 pr-1 pt-1">
               <div className="space-y-4">
                 <div className="space-y-2">
+                  <ModelSelector
+                    className="nopan w-52 text-xs"
+                    value={inputs.model}
+                    onChange={(value) => {
+                      handleChange("model", value);
+                    }}
+                  />
                   <ParametersMultiSelect
                     availableOutputParameters={outputParameterKeys}
                     parameters={data.parameterKeys}
@@ -163,28 +173,15 @@ function ExtractionNode({ id, data }: NodeProps<ExtractionNode>) {
                 <div className="flex items-center justify-between">
                   <div className="flex gap-2">
                     <Label className="text-xs font-normal text-slate-300">
-                      Max Retries
+                      Engine
                     </Label>
-                    <HelpTooltip
-                      content={helpTooltips["extraction"]["maxRetries"]}
-                    />
                   </div>
-                  <Input
-                    type="number"
-                    placeholder={placeholders["extraction"]["maxRetries"]}
-                    className="nopan w-52 text-xs"
-                    min="0"
-                    value={inputs.maxRetries ?? ""}
-                    onChange={(event) => {
-                      if (!editable) {
-                        return;
-                      }
-                      const value =
-                        event.target.value === ""
-                          ? null
-                          : Number(event.target.value);
-                      handleChange("maxRetries", value);
+                  <RunEngineSelector
+                    value={inputs.engine}
+                    onChange={(value) => {
+                      handleChange("engine", value);
                     }}
+                    className="nopan w-52 text-xs"
                   />
                 </div>
                 <div className="flex items-center justify-between">

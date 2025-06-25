@@ -123,6 +123,7 @@ export type TaskApiResponse = {
   failure_reason: string | null;
   errors: Array<Record<string, unknown>>;
   max_steps_per_run: number | null;
+  task_v2: TaskV2 | null;
   workflow_run_id: string | null;
 };
 
@@ -134,11 +135,14 @@ export type CreateTaskRequest = {
   data_extraction_goal?: string | null;
   navigation_payload?: Record<string, unknown> | string | null;
   extracted_information_schema?: Record<string, unknown> | string | null;
+  extra_http_headers?: Record<string, string> | null;
   error_code_mapping?: Record<string, string> | null;
   proxy_location?: ProxyLocation | null;
   totp_verification_url?: string | null;
   totp_identifier?: string | null;
   application?: string | null;
+  include_action_history_in_verification?: boolean | null;
+  max_screenshot_scrolling_times?: number | null;
 };
 
 export type User = {
@@ -177,6 +181,13 @@ export const ActionTypes = {
   SolveCaptcha: "solve_captcha",
   extract: "extract",
   ReloadPage: "reload_page",
+  KeyPress: "keypress",
+  Scroll: "scroll",
+  Move: "move",
+  NullAction: "null_action",
+  VerificationCode: "verification_code",
+  Drag: "drag",
+  LeftMouse: "left_mouse",
 } as const;
 
 export type ActionType = (typeof ActionTypes)[keyof typeof ActionTypes];
@@ -194,6 +205,13 @@ export const ReadableActionTypes: {
   solve_captcha: "Solve Captcha",
   extract: "Extract Data",
   reload_page: "Reload Page",
+  keypress: "Press Keys",
+  scroll: "Scroll",
+  move: "Move",
+  null_action: "Screenshot",
+  verification_code: "Verification Code",
+  drag: "Drag",
+  left_mouse: "Left Mouse",
 };
 
 export type Option = {
@@ -221,16 +239,41 @@ export type Action = {
   index: number;
 };
 
+export type EvalKind = "workflow" | "task";
+
+export interface Eval {
+  kind: EvalKind;
+  created_at: string;
+  organization_id: string;
+  status: Status;
+  title: string | null;
+  workflow_permanent_id: string | null;
+  workflow_run_id: string | null;
+}
+
+export interface EvalWorkflow extends Eval {
+  kind: "workflow";
+}
+
+export interface EvalTask extends Eval {
+  kind: "task";
+  task_id: string;
+  url: string | null;
+}
+
+export type EvalApiResponse = EvalWorkflow[] | EvalTask[];
+
 export type WorkflowRunApiResponse = {
+  created_at: string;
+  failure_reason: string | null;
+  modified_at: string;
+  proxy_location: ProxyLocation | null;
+  status: Status;
+  title?: string;
+  webhook_callback_url: string;
+  workflow_id: string;
   workflow_permanent_id: string;
   workflow_run_id: string;
-  workflow_id: string;
-  status: Status;
-  proxy_location: ProxyLocation | null;
-  webhook_callback_url: string;
-  created_at: string;
-  modified_at: string;
-  failure_reason: string | null;
   workflow_title: string | null;
 };
 
@@ -240,6 +283,7 @@ export type WorkflowRunStatusApiResponse = {
   status: Status;
   proxy_location: ProxyLocation | null;
   webhook_callback_url: string | null;
+  extra_http_headers: Record<string, string> | null;
   created_at: string;
   modified_at: string;
   parameters: Record<string, unknown>;
@@ -252,6 +296,8 @@ export type WorkflowRunStatusApiResponse = {
   total_cost: number | null;
   task_v2: TaskV2 | null;
   workflow_title: string | null;
+  browser_session_id: string | null;
+  max_screenshot_scrolling_times: number | null;
 };
 
 export type TaskGenerationApiResponse = {
@@ -294,12 +340,14 @@ export type TaskV2 = {
   totp_verification_url: string | null;
   totp_identifier: string | null;
   proxy_location: ProxyLocation | null;
+  extra_http_headers: Record<string, string> | null;
 };
 
 export type Createv2TaskRequest = {
   user_prompt: string;
   webhook_callback_url?: string | null;
   proxy_location?: ProxyLocation | null;
+  browser_session_id?: string | null;
 };
 
 export type PasswordCredentialApiResponse = {
@@ -349,4 +397,21 @@ export type CreditCardCredential = {
   card_exp_year: string;
   card_brand: string;
   card_holder_name: string;
+};
+
+export type ModelsResponse = {
+  models: Record<string, string>;
+};
+
+export const RunEngine = {
+  SkyvernV1: "skyvern-1.0",
+  SkyvernV2: "skyvern-2.0",
+  OpenaiCua: "openai-cua",
+  AnthropicCua: "anthropic-cua",
+} as const;
+
+export type RunEngine = (typeof RunEngine)[keyof typeof RunEngine];
+
+export type PylonEmailHash = {
+  hash: string;
 };

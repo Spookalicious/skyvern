@@ -1,6 +1,8 @@
 from typing import Awaitable, Callable
 
+from anthropic import AsyncAnthropic, AsyncAnthropicBedrock
 from fastapi import FastAPI
+from openai import AsyncAzureOpenAI, AsyncOpenAI
 
 from skyvern.forge.agent import ForgeAgent
 from skyvern.forge.agent_functions import AgentFunction
@@ -32,6 +34,26 @@ ARTIFACT_MANAGER = ArtifactManager()
 BROWSER_MANAGER = BrowserManager()
 EXPERIMENTATION_PROVIDER: BaseExperimentationProvider = NoOpExperimentationProvider()
 LLM_API_HANDLER = LLMAPIHandlerFactory.get_llm_api_handler(SettingsManager.get_settings().LLM_KEY)
+OPENAI_CLIENT = AsyncOpenAI(api_key=SettingsManager.get_settings().OPENAI_API_KEY or "")
+if SettingsManager.get_settings().ENABLE_AZURE_CUA:
+    OPENAI_CLIENT = AsyncAzureOpenAI(
+        api_key=SettingsManager.get_settings().AZURE_CUA_API_KEY,
+        api_version=SettingsManager.get_settings().AZURE_CUA_API_VERSION,
+        azure_endpoint=SettingsManager.get_settings().AZURE_CUA_ENDPOINT,
+        azure_deployment=SettingsManager.get_settings().AZURE_CUA_DEPLOYMENT,
+    )
+ANTHROPIC_CLIENT = AsyncAnthropic(api_key=SettingsManager.get_settings().ANTHROPIC_API_KEY)
+if SettingsManager.get_settings().ENABLE_BEDROCK_ANTHROPIC:
+    ANTHROPIC_CLIENT = AsyncAnthropicBedrock()
+
+# Add UI-TARS client setup
+UI_TARS_CLIENT = None
+if SettingsManager.get_settings().ENABLE_VOLCENGINE:
+    UI_TARS_CLIENT = AsyncOpenAI(
+        api_key=SettingsManager.get_settings().VOLCENGINE_API_KEY,
+        base_url=SettingsManager.get_settings().VOLCENGINE_API_BASE,
+    )
+
 SECONDARY_LLM_API_HANDLER = LLMAPIHandlerFactory.get_llm_api_handler(
     SETTINGS_MANAGER.SECONDARY_LLM_KEY if SETTINGS_MANAGER.SECONDARY_LLM_KEY else SETTINGS_MANAGER.LLM_KEY
 )

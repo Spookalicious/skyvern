@@ -35,6 +35,8 @@ import { ParametersMultiSelect } from "../TaskNode/ParametersMultiSelect";
 import { AppNode } from "..";
 import { getAvailableOutputParameterKeys } from "../../workflowEditorUtils";
 import { useIsFirstBlockInWorkflow } from "../../hooks/useIsFirstNodeInWorkflow";
+import { RunEngineSelector } from "@/components/EngineSelector";
+import { ModelSelector } from "@/components/ModelSelector";
 
 function NavigationNode({ id, data }: NodeProps<NavigationNode>) {
   const { updateNodeData } = useReactFlow();
@@ -47,7 +49,6 @@ function NavigationNode({ id, data }: NodeProps<NavigationNode>) {
     url: data.url,
     navigationGoal: data.navigationGoal,
     errorCodeMapping: data.errorCodeMapping,
-    maxRetries: data.maxRetries,
     maxStepsOverride: data.maxStepsOverride,
     allowDownloads: data.allowDownloads,
     continueOnFailure: data.continueOnFailure,
@@ -57,6 +58,9 @@ function NavigationNode({ id, data }: NodeProps<NavigationNode>) {
     totpIdentifier: data.totpIdentifier,
     completeCriterion: data.completeCriterion,
     terminateCriterion: data.terminateCriterion,
+    engine: data.engine,
+    model: data.model,
+    includeActionHistoryInVerification: data.includeActionHistoryInVerification,
   });
   const deleteNodeCallback = useDeleteNodeCallback();
 
@@ -196,28 +200,25 @@ function NavigationNode({ id, data }: NodeProps<NavigationNode>) {
                   />
                 </div>
                 <Separator />
+                <ModelSelector
+                  className="nopan w-52 text-xs"
+                  value={inputs.model}
+                  onChange={(value) => {
+                    handleChange("model", value);
+                  }}
+                />
                 <div className="flex items-center justify-between">
                   <div className="flex gap-2">
                     <Label className="text-xs font-normal text-slate-300">
-                      Max Retries
+                      Engine
                     </Label>
-                    <HelpTooltip
-                      content={helpTooltips["navigation"]["maxRetries"]}
-                    />
                   </div>
-                  <Input
-                    type="number"
-                    placeholder={placeholders["navigation"]["maxRetries"]}
-                    className="nopan w-52 text-xs"
-                    min="0"
-                    value={inputs.maxRetries ?? ""}
-                    onChange={(event) => {
-                      const value =
-                        event.target.value === ""
-                          ? null
-                          : Number(event.target.value);
-                      handleChange("maxRetries", value);
+                  <RunEngineSelector
+                    value={inputs.engine}
+                    onChange={(value) => {
+                      handleChange("engine", value);
                     }}
+                    className="nopan w-52 text-xs"
                   />
                 </div>
                 <div className="flex items-center justify-between">
@@ -282,6 +283,31 @@ function NavigationNode({ id, data }: NodeProps<NavigationNode>) {
                   )}
                 </div>
                 <Separator />
+                <div className="flex items-center justify-between">
+                  <div className="flex gap-2">
+                    <Label className="text-xs font-normal text-slate-300">
+                      Include Action History
+                    </Label>
+                    <HelpTooltip
+                      content={
+                        helpTooltips["navigation"][
+                          "includeActionHistoryInVerification"
+                        ]
+                      }
+                    />
+                  </div>
+                  <div className="w-52">
+                    <Switch
+                      checked={inputs.includeActionHistoryInVerification}
+                      onCheckedChange={(checked) => {
+                        handleChange(
+                          "includeActionHistoryInVerification",
+                          checked,
+                        );
+                      }}
+                    />
+                  </div>
+                </div>
                 <div className="flex items-center justify-between">
                   <div className="flex gap-2">
                     <Label className="text-xs font-normal text-slate-300">
@@ -374,6 +400,25 @@ function NavigationNode({ id, data }: NodeProps<NavigationNode>) {
                     }}
                     value={inputs.totpIdentifier ?? ""}
                     placeholder={placeholders["navigation"]["totpIdentifier"]}
+                    className="nopan text-xs"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <div className="flex gap-2">
+                    <Label className="text-xs text-slate-300">
+                      2FA Verification URL
+                    </Label>
+                    <HelpTooltip
+                      content={helpTooltips["task"]["totpVerificationUrl"]}
+                    />
+                  </div>
+                  <WorkflowBlockInputTextarea
+                    nodeId={id}
+                    onChange={(value) => {
+                      handleChange("totpVerificationUrl", value);
+                    }}
+                    value={inputs.totpVerificationUrl ?? ""}
+                    placeholder={placeholders["task"]["totpVerificationUrl"]}
                     className="nopan text-xs"
                   />
                 </div>

@@ -9,6 +9,12 @@ class SkyvernException(Exception):
         super().__init__(message)
 
 
+class SkyvernClientException(SkyvernException):
+    def __init__(self, message: str | None = None, status_code: int | None = None):
+        self.status_code = status_code
+        super().__init__(message)
+
+
 class SkyvernHTTPException(SkyvernException):
     def __init__(self, message: str | None = None, status_code: int = status.HTTP_400_BAD_REQUEST):
         self.status_code = status_code
@@ -157,6 +163,14 @@ class MissingValueForParameter(SkyvernHTTPException):
         )
 
 
+class InvalidCredentialId(SkyvernHTTPException):
+    def __init__(self, credential_id: str) -> None:
+        super().__init__(
+            f"Invalid credential ID: {credential_id}. Failed to resolve to a valid credential.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+
 class WorkflowParameterNotFound(SkyvernHTTPException):
     def __init__(self, workflow_parameter_id: str) -> None:
         super().__init__(
@@ -242,6 +256,11 @@ class FailedToTakeScreenshot(SkyvernException):
 class EmptyScrapePage(SkyvernException):
     def __init__(self) -> None:
         super().__init__("Failed to scrape the page, returned an NONE result")
+
+
+class ScrapingFailed(SkyvernException):
+    def __init__(self) -> None:
+        super().__init__("Scraping failed.")
 
 
 class WorkflowRunContextNotInitialized(SkyvernException):
@@ -608,6 +627,13 @@ class InteractWithDisabledElement(SkyvernException):
         )
 
 
+class InputToInvisibleElement(SkyvernException):
+    def __init__(self, element_id: str):
+        super().__init__(
+            f"The element(id={element_id}) now is not visible. Try to interact with other elements, or try to interact with it later when it's visible."
+        )
+
+
 class FailedToParseActionInstruction(SkyvernException):
     def __init__(self, reason: str | None, error_type: str | None):
         super().__init__(
@@ -642,6 +668,7 @@ class NoTOTPVerificationCodeFound(SkyvernHTTPException):
         self,
         task_id: str | None = None,
         workflow_run_id: str | None = None,
+        workflow_id: str | None = None,
         totp_verification_url: str | None = None,
         totp_identifier: str | None = None,
     ) -> None:
@@ -650,6 +677,8 @@ class NoTOTPVerificationCodeFound(SkyvernHTTPException):
             msg += f" task_id={task_id}"
         if workflow_run_id:
             msg += f" workflow_run_id={workflow_run_id}"
+        if workflow_id:
+            msg += f" workflow_id={workflow_id}"
         if totp_verification_url:
             msg += f" totp_verification_url={totp_verification_url}"
         if totp_identifier:
@@ -661,3 +690,23 @@ class SkyvernContextWindowExceededError(SkyvernException):
     def __init__(self) -> None:
         message = "Context window exceeded. Please contact support@skyvern.com for help."
         super().__init__(message)
+
+
+class LLMCallerNotFoundError(SkyvernException):
+    def __init__(self, uid: str) -> None:
+        super().__init__(f"LLM caller for {uid} is not found")
+
+
+class BrowserSessionAlreadyOccupiedError(SkyvernHTTPException):
+    def __init__(self, browser_session_id: str) -> None:
+        super().__init__(f"Browser session {browser_session_id} is already occupied")
+
+
+class MissingBrowserSessionError(SkyvernHTTPException):
+    def __init__(self, browser_session_id: str) -> None:
+        super().__init__(f"Browser session {browser_session_id} does not exist.")
+
+
+class MissingBrowserAddressError(SkyvernException):
+    def __init__(self, browser_session_id: str) -> None:
+        super().__init__(f"Browser session {browser_session_id} does not have an address.")

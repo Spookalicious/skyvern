@@ -1,5 +1,5 @@
 import { getClient } from "@/api/AxiosClient";
-import { ProxyLocation } from "@/api/types";
+import { ProxyLocation, Status } from "@/api/types";
 import { StatusBadge } from "@/components/StatusBadge";
 import { SwitchBarNavigation } from "@/components/SwitchBarNavigation";
 import { Button } from "@/components/ui/button";
@@ -17,16 +17,14 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "@/components/ui/use-toast";
 import { useApiCredential } from "@/hooks/useApiCredential";
 import { useCredentialGetter } from "@/hooks/useCredentialGetter";
-import { copyText } from "@/util/copyText";
 import { apiBaseUrl } from "@/util/env";
 import {
-  CopyIcon,
+  FileIcon,
   Pencil2Icon,
   PlayIcon,
   ReloadIcon,
 } from "@radix-ui/react-icons";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import fetchToCurl from "fetch-to-curl";
 import { Link, Outlet, useParams, useSearchParams } from "react-router-dom";
 import { statusIsFinalized, statusIsRunningOrQueued } from "../tasks/types";
 import { useWorkflowQuery } from "./hooks/useWorkflowQuery";
@@ -34,6 +32,12 @@ import { useWorkflowRunQuery } from "./hooks/useWorkflowRunQuery";
 import { WorkflowRunTimeline } from "./workflowRun/WorkflowRunTimeline";
 import { useWorkflowRunTimelineQuery } from "./hooks/useWorkflowRunTimelineQuery";
 import { findActiveItem } from "./workflowRun/workflowTimelineUtils";
+import { Label } from "@/components/ui/label";
+import { CodeEditor } from "./components/CodeEditor";
+import { cn } from "@/util/utils";
+import { ScrollArea, ScrollAreaViewport } from "@/components/ui/scroll-area";
+import { CopyApiCommandDropdown } from "@/components/CopyApiCommandDropdown";
+import { type ApiCommandOptions } from "@/util/apiCommands";
 
 function WorkflowRun() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -47,8 +51,11 @@ function WorkflowRun() {
     workflowPermanentId,
   });
 
-  const { data: workflowRun, isLoading: workflowRunIsLoading } =
-    useWorkflowRunQuery();
+  const {
+    data: workflowRun,
+    isLoading: workflowRunIsLoading,
+    isFetched,
+  } = useWorkflowRunQuery();
 
   const { data: workflowRunTimeline } = useWorkflowRunTimelineQuery();
 
@@ -93,6 +100,8 @@ function WorkflowRun() {
   const parameters = workflowRun?.parameters ?? {};
   const proxyLocation =
     workflowRun?.proxy_location ?? ProxyLocation.Residential;
+  const maxScreenshotScrollingTimes =
+    workflowRun?.max_screenshot_scrolling_times ?? null;
 
   const title = workflowIsLoading ? (
     <Skeleton className="h-9 w-48" />
@@ -128,6 +137,37 @@ function WorkflowRun() {
 
   const isTaskv2Run = workflowRun && workflowRun.task_v2 !== null;
 
+  const outputs = workflowRun?.outputs;
+  const extractedInformation =
+    typeof outputs === "object" &&
+    outputs !== null &&
+    "extracted_information" in outputs
+      ? (outputs.extracted_information as Record<string, unknown>)
+      : null;
+
+  const hasSomeExtractedInformation = extractedInformation
+    ? Object.values(extractedInformation).some((value) => value !== null)
+    : false;
+
+  const hasTaskv2Output = Boolean(isTaskv2Run && workflowRun.task_v2?.output);
+
+  const hasFileUrls =
+    isFetched &&
+    workflowRun &&
+    workflowRun.downloaded_file_urls &&
+    workflowRun.downloaded_file_urls.length > 0;
+  const fileUrls = hasFileUrls
+    ? (workflowRun.downloaded_file_urls as string[])
+    : [];
+
+  const showBoth =
+    (hasSomeExtractedInformation || hasTaskv2Output) && hasFileUrls;
+
+  const showOutputSection =
+    workflowRunIsFinalized &&
+    (hasSomeExtractedInformation || hasFileUrls || hasTaskv2Output) &&
+    workflowRun.status === Status.Completed;
+
   return (
     <div className="space-y-8">
       <header className="flex justify-between">
@@ -144,13 +184,9 @@ function WorkflowRun() {
         </div>
 
         <div className="flex gap-2">
-          <Button
-            variant="secondary"
-            onClick={() => {
-              if (!workflowRun) {
-                return;
-              }
-              const curl = fetchToCurl({
+          <CopyApiCommandDropdown
+            getOptions={() =>
+              ({
                 method: "POST",
                 url: `${apiBaseUrl}/workflows/${workflowPermanentId}/run`,
                 body: {
@@ -161,20 +197,9 @@ function WorkflowRun() {
                   "Content-Type": "application/json",
                   "x-api-key": apiCredential ?? "<your-api-key>",
                 },
-              });
-              copyText(curl).then(() => {
-                toast({
-                  variant: "success",
-                  title: "Copied to Clipboard",
-                  description:
-                    "The cURL command has been copied to your clipboard.",
-                });
-              });
-            }}
-          >
-            <CopyIcon className="mr-2 h-4 w-4" />
-            cURL
-          </Button>
+              }) satisfies ApiCommandOptions
+            }
+          />
           <Button asChild variant="secondary">
             <Link to={`/workflows/${workflowPermanentId}/edit`}>
               <Pencil2Icon className="mr-2 h-4 w-4" />
@@ -220,6 +245,8 @@ function WorkflowRun() {
                 state={{
                   data: parameters,
                   proxyLocation,
+                  webhookCallbackUrl: workflowRun?.webhook_callback_url ?? "",
+                  maxScreenshotScrollingTimes,
                 }}
               >
                 <PlayIcon className="mr-2 h-4 w-4" />
@@ -229,6 +256,57 @@ function WorkflowRun() {
           )}
         </div>
       </header>
+      {showOutputSection && (
+        <div
+          className={cn("grid gap-4 rounded-lg bg-slate-elevation1 p-4", {
+            "grid-cols-2": showBoth,
+          })}
+        >
+          {(hasSomeExtractedInformation || hasTaskv2Output) && (
+            <div className="space-y-4">
+              <Label>
+                {hasTaskv2Output ? "Output" : "Extracted Information"}
+              </Label>
+              <CodeEditor
+                language="json"
+                value={
+                  hasTaskv2Output
+                    ? JSON.stringify(workflowRun.task_v2?.output, null, 2)
+                    : JSON.stringify(extractedInformation, null, 2)
+                }
+                readOnly
+                maxHeight="250px"
+              />
+            </div>
+          )}
+          {hasFileUrls && (
+            <div className="space-y-4">
+              <Label>Downloaded Files</Label>
+              <ScrollArea>
+                <ScrollAreaViewport className="max-h-[250px] space-y-2">
+                  {fileUrls.length > 0 ? (
+                    fileUrls.map((url, index) => {
+                      return (
+                        <div key={url} title={url} className="flex gap-2">
+                          <FileIcon className="size-6" />
+                          <a
+                            href={url}
+                            className="underline underline-offset-4"
+                          >
+                            <span>{`File ${index + 1}`}</span>
+                          </a>
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <div className="text-sm">No files downloaded</div>
+                  )}
+                </ScrollAreaViewport>
+              </ScrollArea>
+            </div>
+          )}
+        </div>
+      )}
       {workflowFailureReason}
       <SwitchBarNavigation
         options={[

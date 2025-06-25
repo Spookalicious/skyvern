@@ -9,11 +9,13 @@ from skyvern.forge.sdk.schemas.task_v2 import TaskV2, Thought
 from skyvern.forge.sdk.settings_manager import SettingsManager
 
 
-class LiteLLMParams(TypedDict):
+class LiteLLMParams(TypedDict, total=False):
     api_key: str | None
     api_version: str | None
     api_base: str | None
     model_info: dict[str, Any] | None
+    vertex_credentials: str | None
+    vertex_location: str | None
 
 
 @dataclass(frozen=True)
@@ -93,3 +95,16 @@ class LLMAPIHandler(Protocol):
         screenshots: list[bytes] | None = None,
         parameters: dict[str, Any] | None = None,
     ) -> Awaitable[dict[str, Any]]: ...
+
+
+async def dummy_llm_api_handler(
+    prompt: str,
+    prompt_name: str,
+    step: Step | None = None,
+    task_v2: TaskV2 | None = None,
+    thought: Thought | None = None,
+    ai_suggestion: AISuggestion | None = None,
+    screenshots: list[bytes] | None = None,
+    parameters: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    raise NotImplementedError("Your LLM provider is not configured. Please configure it in the .env file.")

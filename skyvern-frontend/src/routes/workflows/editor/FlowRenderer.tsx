@@ -30,7 +30,7 @@ import {
 import "@xyflow/react/dist/style.css";
 import { AxiosError } from "axios";
 import { nanoid } from "nanoid";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useBlocker, useParams } from "react-router-dom";
 import { stringify as convertToYAML } from "yaml";
 import {
@@ -38,6 +38,7 @@ import {
   WorkflowApiResponse,
   WorkflowEditorParameterTypes,
   WorkflowParameterTypes,
+  WorkflowParameterValueType,
   WorkflowSettings,
 } from "../types/workflowTypes";
 import {
@@ -47,6 +48,7 @@ import {
   BlockYAML,
   ContextParameterYAML,
   CredentialParameterYAML,
+  OnePasswordCredentialParameterYAML,
   ParameterYAML,
   WorkflowCreateYAMLRequest,
   WorkflowParameterYAML,
@@ -67,11 +69,18 @@ import {
 } from "./nodes";
 import { WorkflowNodeLibraryPanel } from "./panels/WorkflowNodeLibraryPanel";
 import { WorkflowParametersPanel } from "./panels/WorkflowParametersPanel";
+import {
+  ParametersState,
+  parameterIsSkyvernCredential,
+  parameterIsOnePasswordCredential,
+  parameterIsBitwardenCredential,
+} from "./types";
 import "./reactFlowOverrideStyles.css";
 import {
   convertEchoParameters,
   createNode,
   defaultEdge,
+  descendants,
   generateNodeLabel,
   getAdditionalParametersForEmailBlock,
   getOutputParameterKey,
@@ -82,7 +91,8 @@ import {
   nodeAdderNode,
   startNode,
 } from "./workflowEditorUtils";
-import { parameterIsBitwardenCredential, ParametersState } from "./types";
+
+import { useAutoPan } from "./useAutoPan";
 
 function convertToParametersYAML(
   parameters: ParametersState,
@@ -92,85 +102,133 @@ function convertToParametersYAML(
   | ContextParameterYAML
   | BitwardenSensitiveInformationParameterYAML
   | BitwardenCreditCardDataParameterYAML
+  | OnePasswordCredentialParameterYAML
   | CredentialParameterYAML
 > {
-  return parameters.map((parameter) => {
-    if (parameter.parameterType === WorkflowEditorParameterTypes.Workflow) {
-      return {
-        parameter_type: WorkflowParameterTypes.Workflow,
-        key: parameter.key,
-        description: parameter.description || null,
-        workflow_parameter_type: parameter.dataType,
-        ...(parameter.defaultValue === null
-          ? {}
-          : { default_value: parameter.defaultValue }),
-      };
-    } else if (
-      parameter.parameterType === WorkflowEditorParameterTypes.Context
-    ) {
-      return {
-        parameter_type: WorkflowParameterTypes.Context,
-        key: parameter.key,
-        description: parameter.description || null,
-        source_parameter_key: parameter.sourceParameterKey,
-      };
-    } else if (
-      parameter.parameterType === WorkflowEditorParameterTypes.Secret
-    ) {
-      return {
-        parameter_type: WorkflowParameterTypes.Bitwarden_Sensitive_Information,
-        key: parameter.key,
-        bitwarden_identity_key: parameter.identityKey,
-        bitwarden_identity_fields: parameter.identityFields,
-        description: parameter.description || null,
-        bitwarden_collection_id: parameter.collectionId,
-        bitwarden_client_id_aws_secret_key: BITWARDEN_CLIENT_ID_AWS_SECRET_KEY,
-        bitwarden_client_secret_aws_secret_key:
-          BITWARDEN_CLIENT_SECRET_AWS_SECRET_KEY,
-        bitwarden_master_password_aws_secret_key:
-          BITWARDEN_MASTER_PASSWORD_AWS_SECRET_KEY,
-      };
-    } else if (
-      parameter.parameterType === WorkflowEditorParameterTypes.CreditCardData
-    ) {
-      return {
-        parameter_type: WorkflowParameterTypes.Bitwarden_Credit_Card_Data,
-        key: parameter.key,
-        description: parameter.description || null,
-        bitwarden_item_id: parameter.itemId,
-        bitwarden_collection_id: parameter.collectionId,
-        bitwarden_client_id_aws_secret_key: BITWARDEN_CLIENT_ID_AWS_SECRET_KEY,
-        bitwarden_client_secret_aws_secret_key:
-          BITWARDEN_CLIENT_SECRET_AWS_SECRET_KEY,
-        bitwarden_master_password_aws_secret_key:
-          BITWARDEN_MASTER_PASSWORD_AWS_SECRET_KEY,
-      };
-    } else {
-      if (parameterIsBitwardenCredential(parameter)) {
-        return {
-          parameter_type: WorkflowParameterTypes.Bitwarden_Login_Credential,
-          key: parameter.key,
-          description: parameter.description || null,
-          bitwarden_collection_id: parameter.collectionId,
-          bitwarden_item_id: parameter.itemId,
-          url_parameter_key: parameter.urlParameterKey,
-          bitwarden_client_id_aws_secret_key:
-            BITWARDEN_CLIENT_ID_AWS_SECRET_KEY,
-          bitwarden_client_secret_aws_secret_key:
-            BITWARDEN_CLIENT_SECRET_AWS_SECRET_KEY,
-          bitwarden_master_password_aws_secret_key:
-            BITWARDEN_MASTER_PASSWORD_AWS_SECRET_KEY,
-        };
-      } else {
-        return {
-          parameter_type: WorkflowParameterTypes.Credential,
-          key: parameter.key,
-          description: parameter.description || null,
-          credential_id: parameter.credentialId,
-        };
-      }
-    }
-  });
+  return parameters
+    .map(
+      (
+        parameter: ParametersState[number],
+      ):
+        | WorkflowParameterYAML
+        | BitwardenLoginCredentialParameterYAML
+        | ContextParameterYAML
+        | BitwardenSensitiveInformationParameterYAML
+        | BitwardenCreditCardDataParameterYAML
+        | OnePasswordCredentialParameterYAML
+        | CredentialParameterYAML
+        | undefined => {
+        if (parameter.parameterType === WorkflowEditorParameterTypes.Workflow) {
+          return {
+            parameter_type: WorkflowParameterTypes.Workflow,
+            key: parameter.key,
+            description: parameter.description || null,
+            workflow_parameter_type: parameter.dataType,
+            ...(parameter.defaultValue === null
+              ? {}
+              : { default_value: parameter.defaultValue }),
+          };
+        } else if (
+          parameter.parameterType === WorkflowEditorParameterTypes.Context
+        ) {
+          return {
+            parameter_type: WorkflowParameterTypes.Context,
+            key: parameter.key,
+            description: parameter.description || null,
+            source_parameter_key: parameter.sourceParameterKey,
+          };
+        } else if (
+          parameter.parameterType === WorkflowEditorParameterTypes.Secret
+        ) {
+          return {
+            parameter_type:
+              WorkflowParameterTypes.Bitwarden_Sensitive_Information,
+            key: parameter.key,
+            bitwarden_identity_key: parameter.identityKey,
+            bitwarden_identity_fields: parameter.identityFields,
+            description: parameter.description || null,
+            bitwarden_collection_id: parameter.collectionId,
+            bitwarden_client_id_aws_secret_key:
+              BITWARDEN_CLIENT_ID_AWS_SECRET_KEY,
+            bitwarden_client_secret_aws_secret_key:
+              BITWARDEN_CLIENT_SECRET_AWS_SECRET_KEY,
+            bitwarden_master_password_aws_secret_key:
+              BITWARDEN_MASTER_PASSWORD_AWS_SECRET_KEY,
+          };
+        } else if (
+          parameter.parameterType ===
+          WorkflowEditorParameterTypes.CreditCardData
+        ) {
+          return {
+            parameter_type: WorkflowParameterTypes.Bitwarden_Credit_Card_Data,
+            key: parameter.key,
+            description: parameter.description || null,
+            bitwarden_item_id: parameter.itemId,
+            bitwarden_collection_id: parameter.collectionId,
+            bitwarden_client_id_aws_secret_key:
+              BITWARDEN_CLIENT_ID_AWS_SECRET_KEY,
+            bitwarden_client_secret_aws_secret_key:
+              BITWARDEN_CLIENT_SECRET_AWS_SECRET_KEY,
+            bitwarden_master_password_aws_secret_key:
+              BITWARDEN_MASTER_PASSWORD_AWS_SECRET_KEY,
+          };
+        } else {
+          if (parameterIsBitwardenCredential(parameter)) {
+            return {
+              parameter_type: WorkflowParameterTypes.Bitwarden_Login_Credential,
+              key: parameter.key,
+              description: parameter.description || null,
+              bitwarden_collection_id: parameter.collectionId,
+              bitwarden_item_id: parameter.itemId,
+              url_parameter_key: parameter.urlParameterKey,
+              bitwarden_client_id_aws_secret_key:
+                BITWARDEN_CLIENT_ID_AWS_SECRET_KEY,
+              bitwarden_client_secret_aws_secret_key:
+                BITWARDEN_CLIENT_SECRET_AWS_SECRET_KEY,
+              bitwarden_master_password_aws_secret_key:
+                BITWARDEN_MASTER_PASSWORD_AWS_SECRET_KEY,
+            };
+          } else if (parameterIsSkyvernCredential(parameter)) {
+            return {
+              parameter_type: WorkflowParameterTypes.Workflow,
+              workflow_parameter_type: WorkflowParameterValueType.CredentialId,
+              default_value: parameter.credentialId,
+              key: parameter.key,
+              description: parameter.description || null,
+            };
+          } else if (parameterIsOnePasswordCredential(parameter)) {
+            return {
+              parameter_type: WorkflowParameterTypes.OnePassword,
+              key: parameter.key,
+              description: parameter.description || null,
+              vault_id: parameter.vaultId,
+              item_id: parameter.itemId,
+            };
+          }
+        }
+        return undefined;
+      },
+    )
+    .filter(
+      (
+        param:
+          | WorkflowParameterYAML
+          | BitwardenLoginCredentialParameterYAML
+          | ContextParameterYAML
+          | BitwardenSensitiveInformationParameterYAML
+          | BitwardenCreditCardDataParameterYAML
+          | OnePasswordCredentialParameterYAML
+          | CredentialParameterYAML
+          | undefined,
+      ): param is
+        | WorkflowParameterYAML
+        | BitwardenLoginCredentialParameterYAML
+        | ContextParameterYAML
+        | BitwardenSensitiveInformationParameterYAML
+        | BitwardenCreditCardDataParameterYAML
+        | OnePasswordCredentialParameterYAML
+        | CredentialParameterYAML => param !== undefined,
+    );
 }
 
 type Props = {
@@ -203,7 +261,8 @@ function FlowRenderer({
     useWorkflowPanelStore();
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
-  const [parameters, setParameters] = useState(initialParameters);
+  const [parameters, setParameters] =
+    useState<ParametersState>(initialParameters);
   const [title, setTitle] = useState(initialTitle);
   const nodesInitialized = useNodesInitialized();
   const { hasChanges, setHasChanges } = useWorkflowHasChangesStore();
@@ -223,13 +282,50 @@ function FlowRenderer({
         return;
       }
       const client = await getClient(credentialGetter);
+      const extraHttpHeaders: Record<string, string> = {};
+      if (data.settings.extraHttpHeaders) {
+        try {
+          const parsedHeaders = JSON.parse(data.settings.extraHttpHeaders);
+          if (
+            parsedHeaders &&
+            typeof parsedHeaders === "object" &&
+            !Array.isArray(parsedHeaders)
+          ) {
+            for (const [key, value] of Object.entries(parsedHeaders)) {
+              if (key && typeof key === "string") {
+                if (key in extraHttpHeaders) {
+                  toast({
+                    title: "Error",
+                    description: `Duplicate key '${key}' in extra http headers`,
+                    variant: "destructive",
+                  });
+                  continue;
+                }
+                extraHttpHeaders[key] = String(value);
+              }
+            }
+          }
+        } catch (error) {
+          toast({
+            title: "Error",
+            description: "Invalid JSON format in extra http headers",
+            variant: "destructive",
+          });
+          return;
+        }
+      }
+
       const requestBody: WorkflowCreateYAMLRequest = {
         title: data.title,
         description: workflow.description,
         proxy_location: data.settings.proxyLocation,
         webhook_callback_url: data.settings.webhookCallbackUrl,
         persist_browser_session: data.settings.persistBrowserSession,
+        model: data.settings.model,
+        max_screenshot_scrolling_times:
+          data.settings.maxScreenshotScrollingTimes,
         totp_verification_url: workflow.totp_verification_url,
+        extra_http_headers: extraHttpHeaders,
         workflow_definition: {
           parameters: data.parameters,
           blocks: data.blocks,
@@ -406,10 +502,20 @@ function FlowRenderer({
     if (!node || !isWorkflowBlockNode(node)) {
       return;
     }
+    const nodesToDelete = descendants(nodes, id);
     const deletedNodeLabel = node.data.label;
-    const newNodes = nodes.filter((node) => node.id !== id);
+    const newNodes = nodes.filter(
+      (node) => !nodesToDelete.includes(node) && node.id !== id,
+    );
     const newEdges = edges.flatMap((edge) => {
       if (edge.source === id) {
+        return [];
+      }
+      if (
+        nodesToDelete.some(
+          (node) => node.id === edge.source || node.id === edge.target,
+        )
+      ) {
         return [];
       }
       if (edge.target === id) {
@@ -481,6 +587,10 @@ function FlowRenderer({
     doLayout(newNodesWithUpdatedParameters, newEdges);
   }
 
+  const editorElementRef = useRef<HTMLDivElement>(null);
+
+  useAutoPan(editorElementRef, nodes);
+
   return (
     <>
       <Dialog
@@ -529,6 +639,7 @@ function FlowRenderer({
       >
         <DeleteNodeCallbackContext.Provider value={deleteNode}>
           <ReactFlow
+            ref={editorElementRef}
             nodes={nodes}
             edges={edges}
             onNodesChange={(changes) => {

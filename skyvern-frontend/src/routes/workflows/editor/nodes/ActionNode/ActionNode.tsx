@@ -21,7 +21,6 @@ import { EditableNodeTitle } from "../components/EditableNodeTitle";
 import { NodeActionMenu } from "../NodeActionMenu";
 import type { ActionNode } from "./types";
 import { HelpTooltip } from "@/components/HelpTooltip";
-import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { errorMappingExampleValue } from "../types";
 import { CodeEditor } from "@/routes/workflows/components/CodeEditor";
@@ -35,6 +34,8 @@ import { AppNode } from "..";
 import { getAvailableOutputParameterKeys } from "../../workflowEditorUtils";
 import { ParametersMultiSelect } from "../TaskNode/ParametersMultiSelect";
 import { useIsFirstBlockInWorkflow } from "../../hooks/useIsFirstNodeInWorkflow";
+import { RunEngineSelector } from "@/components/EngineSelector";
+import { ModelSelector } from "@/components/ModelSelector";
 
 const urlTooltip =
   "The URL Skyvern is navigating to. Leave this field blank to pick up from where the last block left off.";
@@ -54,13 +55,14 @@ function ActionNode({ id, data }: NodeProps<ActionNode>) {
     url: data.url,
     navigationGoal: data.navigationGoal,
     errorCodeMapping: data.errorCodeMapping,
-    maxRetries: data.maxRetries,
     allowDownloads: data.allowDownloads,
     continueOnFailure: data.continueOnFailure,
     cacheActions: data.cacheActions,
     downloadSuffix: data.downloadSuffix,
     totpVerificationUrl: data.totpVerificationUrl,
+    model: data.model,
     totpIdentifier: data.totpIdentifier,
+    engine: data.engine,
   });
   const deleteNodeCallback = useDeleteNodeCallback();
 
@@ -175,6 +177,13 @@ function ActionNode({ id, data }: NodeProps<ActionNode>) {
             <AccordionContent className="pl-6 pr-1 pt-1">
               <div className="space-y-4">
                 <div className="space-y-2">
+                  <ModelSelector
+                    className="nopan w-52 text-xs"
+                    value={inputs.model}
+                    onChange={(value) => {
+                      handleChange("model", value);
+                    }}
+                  />
                   <ParametersMultiSelect
                     availableOutputParameters={outputParameterKeys}
                     parameters={data.parameterKeys}
@@ -186,28 +195,15 @@ function ActionNode({ id, data }: NodeProps<ActionNode>) {
                 <div className="flex items-center justify-between">
                   <div className="flex gap-2">
                     <Label className="text-xs font-normal text-slate-300">
-                      Max Retries
+                      Engine
                     </Label>
-                    <HelpTooltip
-                      content={helpTooltips["action"]["maxRetries"]}
-                    />
                   </div>
-                  <Input
-                    type="number"
-                    placeholder={placeholders["action"]["maxRetries"]}
-                    className="nopan w-52 text-xs"
-                    min="0"
-                    value={inputs.maxRetries ?? ""}
-                    onChange={(event) => {
-                      if (!editable) {
-                        return;
-                      }
-                      const value =
-                        event.target.value === ""
-                          ? null
-                          : Number(event.target.value);
-                      handleChange("maxRetries", value);
+                  <RunEngineSelector
+                    value={inputs.engine}
+                    onChange={(value) => {
+                      handleChange("engine", value);
                     }}
+                    className="nopan w-52 text-xs"
                   />
                 </div>
                 <div className="space-y-2">
@@ -355,6 +351,25 @@ function ActionNode({ id, data }: NodeProps<ActionNode>) {
                     }}
                     value={inputs.totpIdentifier ?? ""}
                     placeholder={placeholders["action"]["totpIdentifier"]}
+                    className="nopan text-xs"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <div className="flex gap-2">
+                    <Label className="text-xs text-slate-300">
+                      2FA Verification URL
+                    </Label>
+                    <HelpTooltip
+                      content={helpTooltips["task"]["totpVerificationUrl"]}
+                    />
+                  </div>
+                  <WorkflowBlockInputTextarea
+                    nodeId={id}
+                    onChange={(value) => {
+                      handleChange("totpVerificationUrl", value);
+                    }}
+                    value={inputs.totpVerificationUrl ?? ""}
+                    placeholder={placeholders["task"]["totpVerificationUrl"]}
                     className="nopan text-xs"
                   />
                 </div>

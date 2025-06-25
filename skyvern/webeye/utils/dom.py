@@ -5,14 +5,16 @@ import copy
 import typing
 from enum import StrEnum
 from random import uniform
+from urllib.parse import urlparse
 
 import structlog
 from playwright.async_api import ElementHandle, Frame, FrameLocator, Locator, Page, TimeoutError
 
 from skyvern.config import settings
-from skyvern.constants import SKYVERN_ID_ATTR
+from skyvern.constants import SKYVERN_ID_ATTR, TEXT_INPUT_DELAY
 from skyvern.exceptions import (
     ElementIsNotLabel,
+    InteractWithDisabledElement,
     MissingElement,
     MissingElementDict,
     MissingElementInCSSMap,
@@ -22,18 +24,15 @@ from skyvern.exceptions import (
     NoneFrameError,
     SkyvernException,
 )
+from skyvern.webeye.actions import handler_utils
 from skyvern.webeye.scraper.scraper import IncrementalScrapePage, ScrapedPage, json_to_html, trim_element
 from skyvern.webeye.utils.page import SkyvernFrame
 
 LOG = structlog.get_logger()
-
-TEXT_INPUT_DELAY = 10  # 10ms between each character input
-TEXT_PRESS_MAX_LENGTH = 20
+COMMON_INPUT_TAGS = {"input", "textarea", "select"}
 
 
-async def resolve_locator(
-    scrape_page: ScrapedPage, page: Page, frame: str, css: str
-) -> typing.Tuple[Locator, Page | Frame]:
+async def resolve_locator(scrape_page: ScrapedPage, page: Page, frame: str, css: str) -> tuple[Locator, Page | Frame]:
     iframe_path: list[str] = []
 
     while frame != "main.frame":
@@ -92,6 +91,7 @@ class SkyvernElement:
     When you try to interact with these elements by python, you are supposed to use this class as an interface.
     """
 
+    # TODO: support to create SkyvernElement from incremental page by xpath
     @classmethod
     async def create_from_incremental(cls, incre_page: IncrementalScrapePage, element_id: str) -> SkyvernElement:
         element_dict = incre_page.id_to_element_dict.get(element_id)
@@ -126,9 +126,21 @@ class SkyvernElement:
         self.__frame = frame
         self.locator = locator
         self.hash_value = hash_value
+        self._id_cache = static_element.get("id", "")
+        self._tag_name = static_element.get("tagName", "")
+        self._selectable = static_element.get("isSelectable", False)
+        self._frame_id = static_element.get("frame", "")
+        self._attributes = static_element.get("attributes", {})
 
     def __repr__(self) -> str:
         return f"SkyvernElement({str(self.__static_element)})"
+
+    async def _trim_target_attr(self) -> None:
+        if "target" not in self.get_attributes():
+            return
+        LOG.debug("Removing target attribute from the element", element=self.get_id())
+        skyvern_frame = await SkyvernFrame.create_instance(self.get_frame())
+        await skyvern_frame.remove_target_attr(await self.get_element_handler())
 
     def build_HTML(self, need_trim_element: bool = True, need_skyvern_attrs: bool = True) -> str:
         element_dict = self.get_element_dict()
@@ -142,18 +154,22 @@ class SkyvernElement:
         if tag_name != InteractiveElement.INPUT:
             return False
 
-        autocomplete = await self.get_attr("aria-autocomplete")
-        if autocomplete and autocomplete == "list":
+        data_bind: str | None = await self.get_attr("data-x-bind")
+        if data_bind and "autocomplete" in data_bind.lower():
+            return True
+
+        autocomplete: str | None = await self.get_attr("aria-autocomplete")
+        if autocomplete and autocomplete.lower() == "list":
             return True
 
         class_name: str | None = await self.get_attr("class")
-        if class_name and "autocomplete-input" in class_name:
+        if class_name and "autocomplete-input" in class_name.lower():
             return True
 
         return False
 
     async def is_custom_option(self) -> bool:
-        return self.get_tag_name() == "li" or await self.get_attr("role") == "option"
+        return self.get_tag_name() == "li" or await self.get_attr("role", mode="static") == "option"
 
     async def is_checkbox(self) -> bool:
         tag_name = self.get_tag_name()
@@ -233,9 +249,10 @@ class SkyvernElement:
         aria_disabled_attr: bool | str | None = None
         style_disabled: bool = False
 
+        mode: typing.Literal["auto", "dynamic"] = "dynamic" if dynamic else "auto"
         try:
-            disabled_attr = await self.get_attr("disabled", dynamic=dynamic)
-            aria_disabled_attr = await self.get_attr("aria-disabled", dynamic=dynamic)
+            disabled_attr = await self.get_attr("disabled", mode=mode)
+            aria_disabled_attr = await self.get_attr("aria-disabled", mode=mode)
             skyvern_frame = await SkyvernFrame.create_instance(self.get_frame())
             style_disabled = await skyvern_frame.get_disabled_from_style(await self.get_element_handler())
 
@@ -264,7 +281,7 @@ class SkyvernElement:
         return disabled or aria_disabled or style_disabled
 
     async def is_selectable(self) -> bool:
-        return self.get_selectable() or self.get_tag_name() in SELECTABLE_ELEMENT
+        return await self.get_selectable() or self.get_tag_name() in SELECTABLE_ELEMENT
 
     async def is_visible(self, must_visible_style: bool = True) -> bool:
         if not await self.get_locator().count():
@@ -286,25 +303,38 @@ class SkyvernElement:
         skyvern_frame = await SkyvernFrame.create_instance(self.get_frame())
         return await skyvern_frame.is_sibling(await self.get_element_handler(), target)
 
+    async def has_hidden_attr(self) -> bool:
+        hidden: str | None = await self.get_attr("hidden", mode="dynamic")
+        aria_hidden: str | None = await self.get_attr("aria-hidden", mode="dynamic")
+        if hidden is not None and hidden.lower() != "false":
+            return True
+        if aria_hidden is not None and aria_hidden.lower() != "false":
+            return True
+        return False
+
     def get_element_dict(self) -> dict:
         return self.__static_element
 
-    def get_selectable(self) -> bool:
-        return self.__static_element.get("isSelectable", False)
+    async def get_selectable(self) -> bool:
+        if self.get_tag_name() == InteractiveElement.INPUT:
+            input_type = await self.get_attr("type", mode="static")
+            if input_type == "select-one" or input_type == "select-multiple":
+                return True
+        return self._selectable
 
     def get_tag_name(self) -> str:
-        return self.__static_element.get("tagName", "")
+        return self._tag_name
 
     def get_id(self) -> str:
-        return self.__static_element.get("id", "")
+        return self._id_cache
 
     def get_frame_id(self) -> str:
-        return self.__static_element.get("frame", "")
+        return self._frame_id
 
-    def get_attributes(self) -> typing.Dict:
-        return self.__static_element.get("attributes", {})
+    def get_attributes(self) -> dict:
+        return self._attributes
 
-    def get_options(self) -> typing.List[SkyvernOptionType]:
+    def get_options(self) -> list[SkyvernOptionType]:
         options = self.__static_element.get("options", None)
         if options is None:
             return []
@@ -324,6 +354,27 @@ class SkyvernElement:
         handler = await self.locator.element_handle(timeout=timeout)
         assert handler is not None
         return handler
+
+    async def should_use_navigation_instead_click(self, page: Page) -> str | None:
+        if await self.get_attr("target", mode="static") != "_blank":
+            return None
+
+        href: str | None = await self.get_attr("href", mode="static")
+        if not href:
+            return None
+
+        href_url = urlparse(href)
+        if href_url.scheme.lower() not in ["http", "https"]:
+            return None
+
+        if not href_url.netloc:
+            return None
+
+        cur_url = urlparse(page.url)
+        if href_url.netloc.lower() == cur_url.netloc.lower():
+            return None
+
+        return href
 
     async def find_blocking_element(
         self, dom: DomUtil, incremental_page: IncrementalScrapePage | None = None
@@ -501,12 +552,18 @@ class SkyvernElement:
     async def get_attr(
         self,
         attr_name: str,
-        dynamic: bool = False,
+        mode: typing.Literal["auto", "dynamic", "static"] = "auto",
         timeout: float = settings.BROWSER_ACTION_TIMEOUT_MS,
     ) -> typing.Any:
-        if not dynamic:
+        """
+        mode:
+            auto: use value from the self.get_attributes() first. if empty, then try to get the value from the locator.get_attribute()
+            dynamic: always use locator.get_attribute()
+            static: always use self.get_attributes()
+        """
+        if mode != "dynamic":
             attr = self.get_attributes().get(attr_name)
-            if attr is not None:
+            if attr is not None or mode == "static":
                 return attr
 
         return await self.locator.get_attribute(attr_name, timeout=timeout)
@@ -515,20 +572,19 @@ class SkyvernElement:
         await self.get_locator().focus(timeout=timeout)
 
     async def input_sequentially(self, text: str, default_timeout: float = settings.BROWSER_ACTION_TIMEOUT_MS) -> None:
-        length = len(text)
-        if length > TEXT_PRESS_MAX_LENGTH:
-            # if the text is longer than TEXT_PRESS_MAX_LENGTH characters, we will locator.fill in initial texts until the last TEXT_PRESS_MAX_LENGTH characters
-            # and then type the last TEXT_PRESS_MAX_LENGTH characters with locator.press_sequentially
-            await self.input_fill(text[: length - TEXT_PRESS_MAX_LENGTH])
-            text = text[length - TEXT_PRESS_MAX_LENGTH :]
-
-        await self.press_fill(text, timeout=default_timeout)
+        await handler_utils.input_sequentially(self.get_locator(), text, timeout=default_timeout)
 
     async def press_key(self, key: str, timeout: float = settings.BROWSER_ACTION_TIMEOUT_MS) -> None:
         await self.get_locator().press(key=key, timeout=timeout)
 
     async def press_fill(self, text: str, timeout: float = settings.BROWSER_ACTION_TIMEOUT_MS) -> None:
         await self.get_locator().press_sequentially(text, delay=TEXT_INPUT_DELAY, timeout=timeout)
+
+    async def input(self, text: str, timeout: float = settings.BROWSER_ACTION_TIMEOUT_MS) -> None:
+        if self.get_tag_name().lower() not in COMMON_INPUT_TAGS:
+            await self.input_fill(text, timeout=timeout)
+            return
+        await self.input_sequentially(text=text, default_timeout=timeout)
 
     async def input_fill(self, text: str, timeout: float = settings.BROWSER_ACTION_TIMEOUT_MS) -> None:
         await self.get_locator().fill(text, timeout=timeout)
@@ -580,6 +636,45 @@ class SkyvernElement:
 
         return dest_x, dest_y
 
+    async def click(
+        self,
+        page: Page,
+        dom: DomUtil | None = None,
+        incremental_page: IncrementalScrapePage | None = None,
+        timeout: float = settings.BROWSER_ACTION_TIMEOUT_MS,
+    ) -> None:
+        if await self.is_disabled(dynamic=True):
+            raise InteractWithDisabledElement(element_id=self.get_id())
+
+        try:
+            await self.get_locator().click(timeout=timeout)
+            return
+        except Exception:
+            LOG.info("Failed to click by playwright", exc_info=True, element_id=self.get_id())
+
+        if dom is not None:
+            # try to click on the blocking element
+            try:
+                await self.scroll_into_view(timeout=timeout)
+                blocking_element, _ = await self.find_blocking_element(dom=dom, incremental_page=incremental_page)
+                if blocking_element:
+                    LOG.debug("Find the blocking element", element_id=blocking_element.get_id())
+                    await blocking_element.get_locator().click(timeout=timeout)
+                    return
+            except Exception:
+                LOG.info("Failed to click on the blocking element", exc_info=True, element_id=self.get_id())
+
+        try:
+            await self.scroll_into_view(timeout=timeout)
+            await self.coordinate_click(page=page, timeout=timeout)
+            return
+        except Exception:
+            LOG.info("Failed to click by coordinate", exc_info=True, element_id=self.get_id())
+
+        await self.scroll_into_view(timeout=timeout)
+        await self.click_in_javascript()
+        return
+
     async def click_in_javascript(self) -> None:
         skyvern_frame = await SkyvernFrame.create_instance(self.get_frame())
         await skyvern_frame.click_element_in_javascript(await self.get_element_handler())
@@ -616,12 +711,9 @@ class SkyvernElement:
         timeout: float = settings.BROWSER_ACTION_TIMEOUT_MS,
     ) -> float:
         self_rect = await self.get_locator().bounding_box(timeout=timeout)
-        if self_rect is None:
-            raise Exception("Can't Skyvern element rect")
-
         target_rect = await target_locator.bounding_box(timeout=timeout)
         if self_rect is None or target_rect is None:
-            raise Exception("Can't get the target element rect")
+            return float("inf")  # Return infinity as the distance when element rect is not available
 
         y_1 = self_rect["y"] + self_rect["height"] - target_rect["y"]
         y_2 = self_rect["y"] - (target_rect["y"] + target_rect["height"])
@@ -641,12 +733,9 @@ class SkyvernElement:
         timeout: float = settings.BROWSER_ACTION_TIMEOUT_MS,
     ) -> float:
         self_rect = await self.get_locator().bounding_box(timeout=timeout)
-        if self_rect is None:
-            raise Exception("Can't Skyvern element rect")
-
         target_rect = await target_locator.bounding_box(timeout=timeout)
         if self_rect is None or target_rect is None:
-            raise Exception("Can't get the target element rect")
+            return float("inf")  # Return infinity as the distance when element rect is not available
 
         x_1 = self_rect["x"] + self_rect["width"] - target_rect["x"]
         x_2 = self_rect["x"] - (target_rect["x"] + target_rect["width"])
@@ -674,6 +763,45 @@ class SkyvernElement:
             return False
 
         return True
+
+    async def navigate_to_a_href(self, page: Page) -> str | None:
+        if self.get_tag_name() != InteractiveElement.A:
+            await self._trim_target_attr()
+            return None
+
+        href = await self.should_use_navigation_instead_click(page)
+        if not href:
+            await self._trim_target_attr()
+            return None
+
+        LOG.info(
+            "Trying to navigate to the <a> href link instead of clicking",
+            href=href,
+            current_url=page.url,
+        )
+        try:
+            await page.goto(href, timeout=settings.BROWSER_LOADING_TIMEOUT_MS)
+            return href
+        except Exception as e:
+            # some cases use this method to download a file. but it will be redirected away soon
+            # and agent will run into ABORTED error.
+            if "net::ERR_ABORTED" in str(e):
+                return href
+
+            LOG.warning("Failed to navigate to the <a> href link", exc_info=True, href=href, current_url=page.url)
+            raise
+
+    async def refresh_select_options(self) -> tuple[list, str] | None:
+        if self.get_tag_name() != InteractiveElement.SELECT:
+            return None
+
+        frame = await SkyvernFrame.create_instance(self.get_frame())
+        options, selected_value = await frame.get_select_options(await self.get_element_handler())
+        self.__static_element["options"] = options
+        if "attributes" in self.__static_element:
+            self.__static_element["attributes"]["selected"] = selected_value
+            self._attributes = self.__static_element["attributes"]
+        return options, selected_value
 
 
 class DomUtil:
@@ -710,8 +838,20 @@ class DomUtil:
 
         num_elements = await locator.count()
         if num_elements < 1:
-            LOG.warning("No elements found with css. Validation failed.", css=css, element_id=element_id)
-            raise MissingElement(selector=css, element_id=element_id)
+            xpath: str | None = element.get("xpath")
+            if not xpath:
+                LOG.warning("No elements found with css. Validation failed.", css=css, element_id=element_id)
+                raise MissingElement(selector=css, element_id=element_id)
+            else:
+                # WARNING: current xpath is based on the tag name.
+                # It can only represent the element possition in the DOM tree with tag name, it's not 100% reliable.
+                # As long as the current possition has the same element with the tag name, the locator can be found.
+                # (maybe) we should validate the element hash to make sure the element is the same?
+                LOG.warning("Fallback to locator element by xpath.", xpath=xpath, element_id=element_id)
+                locator = frame_content.locator(f"xpath={xpath}")
+                num_elements = await locator.count()
+                if num_elements < 1:
+                    raise MissingElement(selector=xpath, element_id=element_id)
 
         elif num_elements > 1:
             LOG.warning(

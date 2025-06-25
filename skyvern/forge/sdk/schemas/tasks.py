@@ -3,93 +3,23 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
-from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, Field, field_validator
+from fastapi import status
+from pydantic import BaseModel, Field, field_validator, model_validator
+from typing_extensions import Self
 
-from skyvern.exceptions import InvalidTaskStatusTransition, TaskAlreadyCanceled, TaskAlreadyTimeout
-from skyvern.forge.sdk.core.validators import validate_url
+from skyvern.config import settings
+from skyvern.exceptions import (
+    InvalidTaskStatusTransition,
+    SkyvernHTTPException,
+    TaskAlreadyCanceled,
+    TaskAlreadyTimeout,
+)
 from skyvern.forge.sdk.db.enums import TaskType
 from skyvern.forge.sdk.schemas.files import FileInfo
-
-
-class ProxyLocation(StrEnum):
-    US_CA = "US-CA"
-    US_NY = "US-NY"
-    US_TX = "US-TX"
-    US_FL = "US-FL"
-    US_WA = "US-WA"
-    RESIDENTIAL = "RESIDENTIAL"
-    RESIDENTIAL_ES = "RESIDENTIAL_ES"
-    RESIDENTIAL_IE = "RESIDENTIAL_IE"
-    RESIDENTIAL_GB = "RESIDENTIAL_GB"
-    RESIDENTIAL_IN = "RESIDENTIAL_IN"
-    RESIDENTIAL_JP = "RESIDENTIAL_JP"
-    RESIDENTIAL_FR = "RESIDENTIAL_FR"
-    RESIDENTIAL_DE = "RESIDENTIAL_DE"
-    RESIDENTIAL_NZ = "RESIDENTIAL_NZ"
-    RESIDENTIAL_ZA = "RESIDENTIAL_ZA"
-    RESIDENTIAL_AR = "RESIDENTIAL_AR"
-    RESIDENTIAL_ISP = "RESIDENTIAL_ISP"
-    NONE = "NONE"
-
-
-def get_tzinfo_from_proxy(proxy_location: ProxyLocation) -> ZoneInfo | None:
-    if proxy_location == ProxyLocation.NONE:
-        return None
-
-    if proxy_location == ProxyLocation.US_CA:
-        return ZoneInfo("America/Los_Angeles")
-
-    if proxy_location == ProxyLocation.US_NY:
-        return ZoneInfo("America/New_York")
-
-    if proxy_location == ProxyLocation.US_TX:
-        return ZoneInfo("America/Chicago")
-
-    if proxy_location == ProxyLocation.US_FL:
-        return ZoneInfo("America/New_York")
-
-    if proxy_location == ProxyLocation.US_WA:
-        return ZoneInfo("America/New_York")
-
-    if proxy_location == ProxyLocation.RESIDENTIAL:
-        return ZoneInfo("America/New_York")
-
-    if proxy_location == ProxyLocation.RESIDENTIAL_ES:
-        return ZoneInfo("Europe/Madrid")
-
-    if proxy_location == ProxyLocation.RESIDENTIAL_IE:
-        return ZoneInfo("Europe/Dublin")
-
-    if proxy_location == ProxyLocation.RESIDENTIAL_GB:
-        return ZoneInfo("Europe/London")
-
-    if proxy_location == ProxyLocation.RESIDENTIAL_IN:
-        return ZoneInfo("Asia/Kolkata")
-
-    if proxy_location == ProxyLocation.RESIDENTIAL_JP:
-        return ZoneInfo("Asia/Tokyo")
-
-    if proxy_location == ProxyLocation.RESIDENTIAL_FR:
-        return ZoneInfo("Europe/Paris")
-
-    if proxy_location == ProxyLocation.RESIDENTIAL_DE:
-        return ZoneInfo("Europe/Berlin")
-
-    if proxy_location == ProxyLocation.RESIDENTIAL_NZ:
-        return ZoneInfo("Pacific/Auckland")
-
-    if proxy_location == ProxyLocation.RESIDENTIAL_ZA:
-        return ZoneInfo("Africa/Johannesburg")
-
-    if proxy_location == ProxyLocation.RESIDENTIAL_AR:
-        return ZoneInfo("America/Argentina/Buenos_Aires")
-
-    if proxy_location == ProxyLocation.RESIDENTIAL_ISP:
-        return ZoneInfo("America/New_York")
-
-    return None
+from skyvern.schemas.docs.doc_strings import PROXY_LOCATION_DOC_STRING
+from skyvern.schemas.runs import ProxyLocation
+from skyvern.utils.url_validators import validate_url
 
 
 class TaskBase(BaseModel):
@@ -137,12 +67,14 @@ class TaskBase(BaseModel):
     )
     proxy_location: ProxyLocation | None = Field(
         default=None,
-        description="The location of the proxy to use for the task.",
-        examples=["US-WA", "US-CA", "US-FL", "US-NY", "US-TX"],
+        description=PROXY_LOCATION_DOC_STRING,
     )
     extracted_information_schema: dict[str, Any] | list | str | None = Field(
         default=None,
         description="The requested schema of the extracted information.",
+    )
+    extra_http_headers: dict[str, str] | None = Field(
+        None, description="The extra HTTP headers for the requests in browser."
     )
     complete_criterion: str | None = Field(
         default=None, description="Criterion to complete", examples=["Complete if 'hello world' shows up on the page"]
@@ -162,6 +94,16 @@ class TaskBase(BaseModel):
         description="The application for which the task is running",
         examples=["forms"],
     )
+    include_action_history_in_verification: bool | None = Field(
+        default=False,
+        description="Whether to include the action history when verifying the task is complete",
+        examples=[True, False],
+    )
+    max_screenshot_scrolling_times: int | None = Field(
+        default=None,
+        description="Scroll down n times to get the merged screenshot of the page after taking an action. When it's None or 0, it takes the current viewpoint screenshot.",
+        examples=[10],
+    )
 
 
 class TaskRequest(TaskBase):
@@ -177,10 +119,27 @@ class TaskRequest(TaskBase):
     )
     totp_verification_url: str | None = None
     browser_session_id: str | None = None
+    model: dict[str, Any] | None = None
 
-    @field_validator("url", "webhook_callback_url", "totp_verification_url")
+    @model_validator(mode="after")
+    def validate_url(self) -> Self:
+        url = self.url
+        browser_session_id = self.browser_session_id
+
+        if len(url) == 0 and browser_session_id is not None:
+            return self
+
+        url_validation_result = validate_url(url)
+
+        if url_validation_result is None:
+            raise SkyvernHTTPException(message=f"Invalid URL: {url}", status_code=status.HTTP_400_BAD_REQUEST)
+
+        self.url = url_validation_result
+        return self
+
+    @field_validator("webhook_callback_url", "totp_verification_url")
     @classmethod
-    def validate_urls(cls, url: str | None) -> str | None:
+    def validate_optional_urls(cls, url: str | None) -> str | None:
         if url is None:
             return None
 
@@ -280,12 +239,32 @@ class Task(TaskBase):
         None,
         description="The reason for the task failure.",
     )
-    organization_id: str | None = None
+    organization_id: str
     workflow_run_id: str | None = None
+    workflow_permanent_id: str | None = None
     order: int | None = None
     retry: int | None = None
     max_steps_per_run: int | None = None
     errors: list[dict[str, Any]] = []
+    model: dict[str, Any] | None = None
+    queued_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+    @property
+    def llm_key(self) -> str | None:
+        """
+        If the `Task` has a `model` defined, then return the mapped llm_key for it.
+
+        Otherwise return `None`.
+        """
+        if self.model:
+            model_name = self.model.get("model_name")
+            if model_name:
+                mapping = settings.get_model_name_to_llm_key()
+                return mapping.get(model_name, {}).get("llm_key")
+
+        return None
 
     def validate_update(
         self,
@@ -311,9 +290,6 @@ class Task(TaskBase):
         if status.cant_have_extracted_info() and extracted_information is not None:
             raise ValueError(f"status_cant_have_extracted_information({self.task_id})")
 
-        if self.extracted_information is not None and extracted_information is not None:
-            raise ValueError(f"cant_override_extracted_information({self.task_id})")
-
         if self.failure_reason is not None and failure_reason is not None:
             raise ValueError(f"cant_override_failure_reason({self.task_id})")
 
@@ -332,6 +308,9 @@ class Task(TaskBase):
             status=self.status,
             created_at=self.created_at,
             modified_at=self.modified_at,
+            queued_at=self.queued_at,
+            started_at=self.started_at,
+            finished_at=self.finished_at,
             extracted_information=self.extracted_information,
             failure_reason=failure_reason or self.failure_reason,
             action_screenshot_urls=action_screenshot_urls,
@@ -343,6 +322,7 @@ class Task(TaskBase):
             errors=self.errors,
             max_steps_per_run=self.max_steps_per_run,
             workflow_run_id=self.workflow_run_id,
+            max_screenshot_scrolling_times=self.max_screenshot_scrolling_times,
         )
 
 
@@ -363,6 +343,10 @@ class TaskResponse(BaseModel):
     errors: list[dict[str, Any]] = []
     max_steps_per_run: int | None = None
     workflow_run_id: str | None = None
+    queued_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    max_screenshot_scrolling_times: int | None = None
 
 
 class TaskOutput(BaseModel):
@@ -402,3 +386,7 @@ class OrderBy(StrEnum):
 class SortDirection(StrEnum):
     asc = "asc"
     desc = "desc"
+
+
+class ModelsResponse(BaseModel):
+    models: dict[str, str]

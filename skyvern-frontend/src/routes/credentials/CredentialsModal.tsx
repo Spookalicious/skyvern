@@ -10,7 +10,7 @@ import {
   CredentialModalTypes,
 } from "./useCredentialModalState";
 import { PasswordCredentialContent } from "./PasswordCredentialContent";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { CreditCardCredentialContent } from "./CreditCardCredentialContent";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
@@ -20,6 +20,7 @@ import { useCredentialGetter } from "@/hooks/useCredentialGetter";
 import { toast } from "@/components/ui/use-toast";
 import { AxiosError } from "axios";
 import { ReloadIcon } from "@radix-ui/react-icons";
+import { useCredentialsQuery } from "@/routes/workflows/hooks/useCredentialsQuery";
 
 const PASSWORD_CREDENTIAL_INITIAL_VALUES = {
   name: "",
@@ -37,6 +38,24 @@ const CREDIT_CARD_CREDENTIAL_INITIAL_VALUES = {
   cardHolderName: "",
 };
 
+// Function to generate a unique credential name
+function generateDefaultCredentialName(existingNames: string[]): string {
+  const baseName = "credentials";
+
+  // Check if "credentials" is available
+  if (!existingNames.includes(baseName)) {
+    return baseName;
+  }
+
+  // Find the next available number
+  let counter = 1;
+  while (existingNames.includes(`${baseName}_${counter}`)) {
+    counter++;
+  }
+
+  return `${baseName}_${counter}`;
+}
+
 type Props = {
   onCredentialCreated?: (id: string) => void;
 };
@@ -45,12 +64,30 @@ function CredentialsModal({ onCredentialCreated }: Props) {
   const credentialGetter = useCredentialGetter();
   const queryClient = useQueryClient();
   const { isOpen, type, setIsOpen } = useCredentialModalState();
+  const { data: credentials } = useCredentialsQuery();
   const [passwordCredentialValues, setPasswordCredentialValues] = useState(
     PASSWORD_CREDENTIAL_INITIAL_VALUES,
   );
   const [creditCardCredentialValues, setCreditCardCredentialValues] = useState(
     CREDIT_CARD_CREDENTIAL_INITIAL_VALUES,
   );
+
+  // Set default name when modal opens
+  useEffect(() => {
+    if (isOpen && credentials) {
+      const existingNames = credentials.map((cred) => cred.name);
+      const defaultName = generateDefaultCredentialName(existingNames);
+
+      setPasswordCredentialValues((prev) => ({
+        ...prev,
+        name: defaultName,
+      }));
+      setCreditCardCredentialValues((prev) => ({
+        ...prev,
+        name: defaultName,
+      }));
+    }
+  }, [isOpen, credentials]);
 
   function reset() {
     setPasswordCredentialValues(PASSWORD_CREDENTIAL_INITIAL_VALUES);
@@ -86,21 +123,64 @@ function CredentialsModal({ onCredentialCreated }: Props) {
   });
 
   const handleSave = () => {
+    const name =
+      type === CredentialModalTypes.PASSWORD
+        ? passwordCredentialValues.name.trim()
+        : creditCardCredentialValues.name.trim();
+    if (name === "") {
+      toast({
+        title: "Error",
+        description: "Name is required",
+        variant: "destructive",
+      });
+      return;
+    }
+
     if (type === CredentialModalTypes.PASSWORD) {
+      const username = passwordCredentialValues.username.trim();
+      const password = passwordCredentialValues.password.trim();
+      const totp = passwordCredentialValues.totp.trim();
+
+      if (username === "" || password === "") {
+        toast({
+          title: "Error",
+          description: "Username and password are required",
+          variant: "destructive",
+        });
+        return;
+      }
       createCredentialMutation.mutate({
-        name: passwordCredentialValues.name,
+        name,
         credential_type: "password",
         credential: {
-          username: passwordCredentialValues.username,
-          password: passwordCredentialValues.password,
-          totp:
-            passwordCredentialValues.totp === ""
-              ? null
-              : passwordCredentialValues.totp,
+          username,
+          password,
+          totp: totp === "" ? null : totp,
         },
       });
     } else if (type === CredentialModalTypes.CREDIT_CARD) {
-      const cardExpirationDate = creditCardCredentialValues.cardExpirationDate;
+      const cardNumber = creditCardCredentialValues.cardNumber.trim();
+      const cardCode = creditCardCredentialValues.cardCode.trim();
+      const cardExpirationDate =
+        creditCardCredentialValues.cardExpirationDate.trim();
+      const cardBrand = creditCardCredentialValues.cardBrand.trim();
+      const cardHolderName = creditCardCredentialValues.cardHolderName.trim();
+
+      if (
+        cardNumber === "" ||
+        cardCode === "" ||
+        cardExpirationDate === "" ||
+        cardBrand === "" ||
+        cardHolderName === ""
+      ) {
+        toast({
+          title: "Error",
+          description: "All credit card fields are required",
+          variant: "destructive",
+        });
+        return;
+      }
+
       const cardExpirationDateParts = cardExpirationDate.split("/");
       if (cardExpirationDateParts.length !== 2) {
         toast({
@@ -123,15 +203,15 @@ function CredentialsModal({ onCredentialCreated }: Props) {
       // remove all spaces from the card number
       const number = creditCardCredentialValues.cardNumber.replace(/\s/g, "");
       createCredentialMutation.mutate({
-        name: creditCardCredentialValues.name,
+        name,
         credential_type: "credit_card",
         credential: {
           card_number: number,
-          card_cvv: creditCardCredentialValues.cardCode,
+          card_cvv: cardCode,
           card_exp_month: cardExpirationMonth,
           card_exp_year: cardExpirationYear,
-          card_brand: creditCardCredentialValues.cardBrand,
-          card_holder_name: creditCardCredentialValues.cardHolderName,
+          card_brand: cardBrand,
+          card_holder_name: cardHolderName,
         },
       });
     }

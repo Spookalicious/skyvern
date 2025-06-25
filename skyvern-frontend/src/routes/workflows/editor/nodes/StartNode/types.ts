@@ -1,12 +1,16 @@
 import { ProxyLocation } from "@/api/types";
 import type { Node } from "@xyflow/react";
 import { AppNode } from "..";
+import { WorkflowModel } from "@/routes/workflows/types/workflowTypes";
 
 export type WorkflowStartNodeData = {
   withWorkflowSettings: true;
   webhookCallbackUrl: string;
   proxyLocation: ProxyLocation;
   persistBrowserSession: boolean;
+  model: WorkflowModel | null;
+  maxScreenshotScrollingTimes: number | null;
+  extraHttpHeaders: string | null;
   editable: boolean;
 };
 

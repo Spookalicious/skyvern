@@ -1,9 +1,11 @@
 import { WorkflowBlockType } from "../../types/workflowTypes";
+import type { WorkflowModel } from "../../types/workflowTypes";
 
 export type NodeBaseData = {
   label: string;
   continueOnFailure: boolean;
   editable: boolean;
+  model: WorkflowModel | null;
 };
 
 export const errorMappingExampleValue = {
@@ -42,7 +44,8 @@ export const workflowBlockTitle: {
   send_email: "Send Email",
   task: "Task",
   text_prompt: "Text Prompt",
-  upload_to_s3: "Upload",
+  upload_to_s3: "Upload To S3",
+  file_upload: "Upload Files",
   validation: "Validation",
   wait: "Wait",
   pdf_parser: "PDF Parser",

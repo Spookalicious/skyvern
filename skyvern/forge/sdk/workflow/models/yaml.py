@@ -4,10 +4,11 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, Field
 
 from skyvern.config import settings
-from skyvern.forge.sdk.schemas.tasks import ProxyLocation
 from skyvern.forge.sdk.workflow.models.block import BlockType, FileType
+from skyvern.forge.sdk.workflow.models.constants import FileStorageType
 from skyvern.forge.sdk.workflow.models.parameter import ParameterType, WorkflowParameterType
 from skyvern.forge.sdk.workflow.models.workflow import WorkflowStatus
+from skyvern.schemas.runs import ProxyLocation, RunEngine
 
 
 class ParameterYAML(BaseModel, abc.ABC):
@@ -85,6 +86,12 @@ class BitwardenCreditCardDataParameterYAML(ParameterYAML):
     bitwarden_item_id: str
 
 
+class OnePasswordCredentialParameterYAML(ParameterYAML):
+    parameter_type: Literal[ParameterType.ONEPASSWORD] = ParameterType.ONEPASSWORD  # type: ignore
+    vault_id: str
+    item_id: str
+
+
 class WorkflowParameterYAML(ParameterYAML):
     # There is a mypy bug with Literal. Without the type: ignore, mypy will raise an error:
     # Parameter 1 of Literal[...] cannot be of type "Any"
@@ -116,6 +123,7 @@ class BlockYAML(BaseModel, abc.ABC):
     block_type: BlockType
     label: str
     continue_on_failure: bool = False
+    model: dict[str, Any] | None = None
 
 
 class TaskBlockYAML(BlockYAML):
@@ -127,6 +135,7 @@ class TaskBlockYAML(BlockYAML):
 
     url: str | None = None
     title: str = ""
+    engine: RunEngine = RunEngine.skyvern_v1
     navigation_goal: str | None = None
     data_extraction_goal: str | None = None
     data_schema: dict[str, Any] | list | None = None
@@ -141,6 +150,8 @@ class TaskBlockYAML(BlockYAML):
     cache_actions: bool = False
     complete_criterion: str | None = None
     terminate_criterion: str | None = None
+    complete_verification: bool = True
+    include_action_history_in_verification: bool = False
 
 
 class ForLoopBlockYAML(BlockYAML):
@@ -199,6 +210,17 @@ class UploadToS3BlockYAML(BlockYAML):
     path: str | None = None
 
 
+class FileUploadBlockYAML(BlockYAML):
+    block_type: Literal[BlockType.FILE_UPLOAD] = BlockType.FILE_UPLOAD  # type: ignore
+
+    storage_type: FileStorageType = FileStorageType.S3
+    s3_bucket: str | None = None
+    aws_access_key_id: str | None = None
+    aws_secret_access_key: str | None = None
+    region_name: str | None = None
+    path: str | None = None
+
+
 class SendEmailBlockYAML(BlockYAML):
     # There is a mypy bug with Literal. Without the type: ignore, mypy will raise an error:
     # Parameter 1 of Literal[...] cannot be of type "Any"
@@ -245,6 +267,7 @@ class ActionBlockYAML(BlockYAML):
 
     url: str | None = None
     title: str = ""
+    engine: RunEngine = RunEngine.skyvern_v1
     navigation_goal: str | None = None
     error_code_mapping: dict[str, str] | None = None
     max_retries: int = 0
@@ -262,6 +285,7 @@ class NavigationBlockYAML(BlockYAML):
     navigation_goal: str
     url: str | None = None
     title: str = ""
+    engine: RunEngine = RunEngine.skyvern_v1
     error_code_mapping: dict[str, str] | None = None
     max_retries: int = 0
     max_steps_per_run: int | None = None
@@ -273,6 +297,8 @@ class NavigationBlockYAML(BlockYAML):
     cache_actions: bool = False
     complete_criterion: str | None = None
     terminate_criterion: str | None = None
+    complete_verification: bool = True
+    include_action_history_in_verification: bool = False
 
 
 class ExtractionBlockYAML(BlockYAML):
@@ -281,6 +307,7 @@ class ExtractionBlockYAML(BlockYAML):
     data_extraction_goal: str
     url: str | None = None
     title: str = ""
+    engine: RunEngine = RunEngine.skyvern_v1
     data_schema: dict[str, Any] | list | None = None
     max_retries: int = 0
     max_steps_per_run: int | None = None
@@ -293,6 +320,7 @@ class LoginBlockYAML(BlockYAML):
 
     url: str | None = None
     title: str = ""
+    engine: RunEngine = RunEngine.skyvern_v1
     navigation_goal: str | None = None
     error_code_mapping: dict[str, str] | None = None
     max_retries: int = 0
@@ -303,6 +331,7 @@ class LoginBlockYAML(BlockYAML):
     cache_actions: bool = False
     complete_criterion: str | None = None
     terminate_criterion: str | None = None
+    complete_verification: bool = True
 
 
 class WaitBlockYAML(BlockYAML):
@@ -316,6 +345,7 @@ class FileDownloadBlockYAML(BlockYAML):
     navigation_goal: str
     url: str | None = None
     title: str = ""
+    engine: RunEngine = RunEngine.skyvern_v1
     error_code_mapping: dict[str, str] | None = None
     max_retries: int = 0
     max_steps_per_run: int | None = None
@@ -346,6 +376,7 @@ PARAMETER_YAML_SUBCLASSES = (
     | BitwardenLoginCredentialParameterYAML
     | BitwardenSensitiveInformationParameterYAML
     | BitwardenCreditCardDataParameterYAML
+    | OnePasswordCredentialParameterYAML
     | WorkflowParameterYAML
     | ContextParameterYAML
     | OutputParameterYAML
@@ -360,6 +391,7 @@ BLOCK_YAML_SUBCLASSES = (
     | TextPromptBlockYAML
     | DownloadToS3BlockYAML
     | UploadToS3BlockYAML
+    | FileUploadBlockYAML
     | SendEmailBlockYAML
     | FileParserBlockYAML
     | ValidationBlockYAML
@@ -389,6 +421,9 @@ class WorkflowCreateYAMLRequest(BaseModel):
     totp_verification_url: str | None = None
     totp_identifier: str | None = None
     persist_browser_session: bool = False
+    model: dict[str, Any] | None = None
     workflow_definition: WorkflowDefinitionYAML
     is_saved_task: bool = False
+    max_screenshot_scrolling_times: int | None = None
+    extra_http_headers: dict[str, str] | None = None
     status: WorkflowStatus = WorkflowStatus.published

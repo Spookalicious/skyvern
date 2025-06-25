@@ -67,8 +67,9 @@ class ValidationBlockParametersItem_BitwardenLoginCredential(UniversalBaseModel)
     bitwarden_client_id_aws_secret_key: str
     bitwarden_client_secret_aws_secret_key: str
     bitwarden_master_password_aws_secret_key: str
-    url_parameter_key: str
+    url_parameter_key: typing.Optional[str] = None
     bitwarden_collection_id: typing.Optional[str] = None
+    bitwarden_item_id: typing.Optional[str] = None
     created_at: dt.datetime
     modified_at: dt.datetime
     deleted_at: typing.Optional[dt.datetime] = None
@@ -130,6 +131,27 @@ from .context_parameter import ContextParameter  # noqa: E402
 from .context_parameter_source import ContextParameterSource  # noqa: E402
 
 
+class ValidationBlockParametersItem_Credential(UniversalBaseModel):
+    parameter_type: typing.Literal["credential"] = "credential"
+    key: str
+    description: typing.Optional[str] = None
+    credential_parameter_id: str
+    workflow_id: str
+    credential_id: str
+    created_at: dt.datetime
+    modified_at: dt.datetime
+    deleted_at: typing.Optional[dt.datetime] = None
+
+    if IS_PYDANTIC_V2:
+        model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(extra="allow", frozen=True)  # type: ignore # Pydantic v2
+    else:
+
+        class Config:
+            frozen = True
+            smart_union = True
+            extra = pydantic.Extra.allow
+
+
 class ValidationBlockParametersItem_Output(UniversalBaseModel):
     parameter_type: typing.Literal["output"] = "output"
     key: str
@@ -178,8 +200,8 @@ ValidationBlockParametersItem = typing.Union[
     ValidationBlockParametersItem_BitwardenLoginCredential,
     ValidationBlockParametersItem_BitwardenSensitiveInformation,
     ValidationBlockParametersItem_Context,
+    ValidationBlockParametersItem_Credential,
     ValidationBlockParametersItem_Output,
     ValidationBlockParametersItem_Workflow,
 ]
-update_forward_refs(ContextParameter, ValidationBlockParametersItem_Context=ValidationBlockParametersItem_Context)
 update_forward_refs(ValidationBlockParametersItem_Context)

@@ -6,14 +6,17 @@ from enum import StrEnum
 from typing import Any, Awaitable, Callable, Self
 
 import structlog
-from playwright.async_api import Frame, Locator, Page
+from playwright._impl._errors import TimeoutError
+from playwright.async_api import ElementHandle, Frame, Locator, Page
 from pydantic import BaseModel, PrivateAttr
 
 from skyvern.config import settings
-from skyvern.constants import BUILDING_ELEMENT_TREE_TIMEOUT_MS, SKYVERN_DIR, SKYVERN_ID_ATTR
-from skyvern.exceptions import FailedToTakeScreenshot, UnknownElementTreeFormat
+from skyvern.constants import BUILDING_ELEMENT_TREE_TIMEOUT_MS, DEFAULT_MAX_TOKENS, SKYVERN_DIR, SKYVERN_ID_ATTR
+from skyvern.exceptions import FailedToTakeScreenshot, ScrapingFailed, UnknownElementTreeFormat
 from skyvern.forge.sdk.api.crypto import calculate_sha256
 from skyvern.forge.sdk.core import skyvern_context
+from skyvern.utils.image_resizer import Resolution
+from skyvern.utils.token_counter import count_tokens
 from skyvern.webeye.browser_factory import BrowserState
 from skyvern.webeye.utils.page import SkyvernFrame
 
@@ -72,7 +75,7 @@ def load_js_script() -> str:
     try:
         # TODO: Implement TS of domUtils.js and use the complied JS file instead of the raw JS file.
         # This will allow our code to be type safe.
-        with open(path, "r") as f:
+        with open(path) as f:
             return f.read()
     except FileNotFoundError as e:
         LOG.exception("Failed to load the JS script", path=path)
@@ -104,10 +107,6 @@ def json_to_html(element: dict, need_skyvern_attrs: bool = True) -> str:
         else:
             LOG.info("Element is interactable. Trimmed all attributes instead of dropping it", element=element)
             attributes = {}
-
-    if element.get("isCheckable", False) and tag != "input":
-        tag = "input"
-        attributes["type"] = "checkbox"
 
     context = skyvern_context.ensure_context()
 
@@ -233,11 +232,13 @@ class ScrapedPage(BaseModel):
     hash_to_element_ids: dict[str, list[str]]
     element_tree: list[dict]
     element_tree_trimmed: list[dict]
+    economy_element_tree: list[dict] | None = None
+    last_used_element_tree: list[dict] | None = None
     screenshots: list[bytes]
     url: str
     html: str
     extracted_text: str | None = None
-
+    window_dimension: dict[str, int] | None = None
     _browser_state: BrowserState = PrivateAttr()
     _clean_up_func: CleanupElementTreeFunc = PrivateAttr()
     _scrape_exclude: ScrapeExcludeFunc | None = PrivateAttr(default=None)
@@ -261,6 +262,7 @@ class ScrapedPage(BaseModel):
     def build_element_tree(
         self, fmt: ElementTreeFormat = ElementTreeFormat.HTML, html_need_skyvern_attrs: bool = True
     ) -> str:
+        self.last_used_element_tree = self.element_tree_trimmed
         if fmt == ElementTreeFormat.JSON:
             return json.dumps(self.element_tree_trimmed)
 
@@ -272,12 +274,67 @@ class ScrapedPage(BaseModel):
 
         raise UnknownElementTreeFormat(fmt=fmt)
 
-    async def refresh(self) -> Self:
+    def build_economy_elements_tree(
+        self,
+        fmt: ElementTreeFormat = ElementTreeFormat.HTML,
+        html_need_skyvern_attrs: bool = True,
+        percent_to_keep: float = 1,
+    ) -> str:
+        """
+        Economy elements tree doesn't include secondary elements like SVG, etc
+        """
+        if not self.economy_element_tree:
+            economy_elements = []
+            copied_element_tree_trimmed = copy.deepcopy(self.element_tree_trimmed)
+
+            # Process each root element
+            for root_element in copied_element_tree_trimmed:
+                processed_element = self._process_element_for_economy_tree(root_element)
+                if processed_element:
+                    economy_elements.append(processed_element)
+
+            self.economy_element_tree = economy_elements
+
+        final_element_tree = self.economy_element_tree[: int(len(self.economy_element_tree) * percent_to_keep)]
+        self.last_used_element_tree = final_element_tree
+
+        if fmt == ElementTreeFormat.JSON:
+            return json.dumps(final_element_tree)
+
+        if fmt == ElementTreeFormat.HTML:
+            return "".join(
+                json_to_html(element, need_skyvern_attrs=html_need_skyvern_attrs) for element in final_element_tree
+            )
+
+        raise UnknownElementTreeFormat(fmt=fmt)
+
+    def _process_element_for_economy_tree(self, element: dict) -> dict | None:
+        """
+        Helper method to process an element for the economy tree using BFS.
+        Removes SVG elements and their children.
+        """
+        # Skip SVG elements entirely
+        if element.get("tagName", "").lower() == "svg":
+            return None
+
+        # Process children using BFS
+        if "children" in element:
+            new_children = []
+            for child in element["children"]:
+                processed_child = self._process_element_for_economy_tree(child)
+                if processed_child:
+                    new_children.append(processed_child)
+            element["children"] = new_children
+        return element
+
+    async def refresh(self, draw_boxes: bool = True, scroll: bool = True) -> Self:
         refreshed_page = await scrape_website(
             browser_state=self._browser_state,
             url=self.url,
             cleanup_element_tree=self._clean_up_func,
             scrape_exclude=self._scrape_exclude,
+            draw_boxes=draw_boxes,
+            scroll=scroll,
         )
         self.elements = refreshed_page.elements
         self.id_to_css_dict = refreshed_page.id_to_css_dict
@@ -293,14 +350,21 @@ class ScrapedPage(BaseModel):
         self.url = refreshed_page.url
         return self
 
-    async def generate_scraped_page_without_screenshots(self) -> Self:
+    async def generate_scraped_page(
+        self, draw_boxes: bool = True, scroll: bool = True, take_screenshots: bool = True
+    ) -> Self:
         return await scrape_website(
             browser_state=self._browser_state,
             url=self.url,
             cleanup_element_tree=self._clean_up_func,
             scrape_exclude=self._scrape_exclude,
-            take_screenshots=False,
+            take_screenshots=take_screenshots,
+            draw_boxes=draw_boxes,
+            scroll=scroll,
         )
+
+    async def generate_scraped_page_without_screenshots(self) -> Self:
+        return await self.generate_scraped_page(take_screenshots=False)
 
 
 async def scrape_website(
@@ -310,6 +374,9 @@ async def scrape_website(
     num_retry: int = 0,
     scrape_exclude: ScrapeExcludeFunc | None = None,
     take_screenshots: bool = True,
+    draw_boxes: bool = True,
+    max_screenshot_number: int = settings.MAX_NUM_SCREENSHOTS,
+    scroll: bool = True,
 ) -> ScrapedPage:
     """
     ************************************************************************************************
@@ -340,6 +407,9 @@ async def scrape_website(
             cleanup_element_tree=cleanup_element_tree,
             scrape_exclude=scrape_exclude,
             take_screenshots=take_screenshots,
+            draw_boxes=draw_boxes,
+            max_screenshot_number=max_screenshot_number,
+            scroll=scroll,
         )
     except Exception as e:
         # NOTE: MAX_SCRAPING_RETRIES is set to 0 in both staging and production
@@ -353,7 +423,7 @@ async def scrape_website(
             if isinstance(e, FailedToTakeScreenshot):
                 raise e
             else:
-                raise Exception("Scraping failed.")
+                raise ScrapingFailed() from e
         LOG.info("Scraping failed, will retry", num_retry=num_retry, url=url)
         return await scrape_website(
             browser_state,
@@ -361,6 +431,10 @@ async def scrape_website(
             cleanup_element_tree,
             num_retry=num_retry,
             scrape_exclude=scrape_exclude,
+            take_screenshots=take_screenshots,
+            draw_boxes=draw_boxes,
+            max_screenshot_number=max_screenshot_number,
+            scroll=scroll,
         )
 
 
@@ -409,6 +483,9 @@ async def scrape_web_unsafe(
     cleanup_element_tree: CleanupElementTreeFunc,
     scrape_exclude: ScrapeExcludeFunc | None = None,
     take_screenshots: bool = True,
+    draw_boxes: bool = True,
+    max_screenshot_number: int = settings.MAX_NUM_SCREENSHOTS,
+    scroll: bool = True,
 ) -> ScrapedPage:
     """
     Asynchronous function that performs web scraping without any built-in error handling. This function is intended
@@ -430,16 +507,29 @@ async def scrape_web_unsafe(
     # This also solves the issue where we can't scroll due to a popup.(e.g. geico first popup on the homepage after
     # clicking start my quote)
 
-    LOG.info("Waiting for 5 seconds before scraping the website.")
-    await asyncio.sleep(5)
-
-    screenshots = []
-    if take_screenshots:
-        screenshots = await SkyvernFrame.take_split_screenshots(page=page, url=url, draw_boxes=True)
+    LOG.info("Waiting for 3 seconds before scraping the website.")
+    await asyncio.sleep(3)
 
     elements, element_tree = await get_interactable_element_tree(page, scrape_exclude)
     element_tree = await cleanup_element_tree(page, url, copy.deepcopy(element_tree))
+    element_tree_trimmed = trim_element_tree(copy.deepcopy(element_tree))
 
+    screenshots = []
+    if take_screenshots:
+        element_tree_trimmed_html_str = "".join(
+            json_to_html(element, need_skyvern_attrs=False) for element in element_tree_trimmed
+        )
+        token_count = count_tokens(element_tree_trimmed_html_str)
+        if token_count > DEFAULT_MAX_TOKENS:
+            max_screenshot_number = min(max_screenshot_number, 1)
+
+        screenshots = await SkyvernFrame.take_split_screenshots(
+            page=page,
+            url=url,
+            draw_boxes=draw_boxes,
+            max_number=max_screenshot_number,
+            scroll=scroll,
+        )
     id_to_css_dict, id_to_element_dict, id_to_frame_dict, id_to_element_hash, hash_to_element_ids = build_element_dict(
         elements
     )
@@ -451,9 +541,12 @@ async def scrape_web_unsafe(
     text_content = await get_frame_text(page.main_frame)
 
     html = ""
+    window_dimension = None
     try:
         skyvern_frame = await SkyvernFrame.create_instance(frame=page)
         html = await skyvern_frame.get_content()
+        if page.viewport_size:
+            window_dimension = Resolution(width=page.viewport_size["width"], height=page.viewport_size["height"])
     except Exception:
         LOG.error(
             "Failed out to get HTML content",
@@ -469,11 +562,12 @@ async def scrape_web_unsafe(
         id_to_element_hash=id_to_element_hash,
         hash_to_element_ids=hash_to_element_ids,
         element_tree=element_tree,
-        element_tree_trimmed=trim_element_tree(copy.deepcopy(element_tree)),
+        element_tree_trimmed=element_tree_trimmed,
         screenshots=screenshots,
         url=page.url,
         html=html,
         extracted_text=text_content,
+        window_dimension=window_dimension,
         _browser_state=browser_state,
         _clean_up_func=cleanup_element_tree,
         _scrape_exclude=scrape_exclude,
@@ -603,9 +697,20 @@ class IncrementalScrapePage:
         frame = self.skyvern_frame.get_frame()
 
         js_script = "async () => await getIncrementElements()"
-        incremental_elements, incremental_tree = await SkyvernFrame.evaluate(
-            frame=frame, expression=js_script, timeout_ms=BUILDING_ELEMENT_TREE_TIMEOUT_MS
-        )
+        try:
+            incremental_elements, incremental_tree = await SkyvernFrame.evaluate(
+                frame=frame, expression=js_script, timeout_ms=BUILDING_ELEMENT_TREE_TIMEOUT_MS
+            )
+        except TimeoutError:
+            LOG.warning(
+                "Timeout to get incremental elements with wait_until_finished, going to get incremental elements without waiting",
+            )
+
+            js_script = "async () => await getIncrementElements(false)"
+            incremental_elements, incremental_tree = await SkyvernFrame.evaluate(
+                frame=frame, expression=js_script, timeout_ms=BUILDING_ELEMENT_TREE_TIMEOUT_MS
+            )
+
         # we listen the incremental elements seperated by frames, so all elements will be in the same SkyvernFrame
         self.id_to_css_dict, self.id_to_element_dict, _, _, _ = build_element_dict(incremental_elements)
 
@@ -619,9 +724,9 @@ class IncrementalScrapePage:
 
         return self.element_tree_trimmed
 
-    async def start_listen_dom_increment(self) -> None:
-        js_script = "() => startGlobalIncrementalObserver()"
-        await SkyvernFrame.evaluate(frame=self.skyvern_frame.get_frame(), expression=js_script)
+    async def start_listen_dom_increment(self, element: ElementHandle | None = None) -> None:
+        js_script = "async (element) => await startGlobalIncrementalObserver(element)"
+        await SkyvernFrame.evaluate(frame=self.skyvern_frame.get_frame(), expression=js_script, arg=element)
 
     async def stop_listen_dom_increment(self) -> None:
         # check if the DOM has navigated away or refreshed
@@ -634,6 +739,11 @@ class IncrementalScrapePage:
         )
 
     async def get_incremental_elements_num(self) -> int:
+        # check if the DOM has navigated away or refreshed
+        js_script = "() => window.globalOneTimeIncrementElements === undefined"
+        if await SkyvernFrame.evaluate(frame=self.skyvern_frame.get_frame(), expression=js_script):
+            return 0
+
         js_script = "() => window.globalOneTimeIncrementElements.length"
         return await SkyvernFrame.evaluate(frame=self.skyvern_frame.get_frame(), expression=js_script)
 

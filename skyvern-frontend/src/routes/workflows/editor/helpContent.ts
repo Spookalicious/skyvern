@@ -18,12 +18,14 @@ export const baseHelpTooltipContent = {
   errorCodeMapping:
     "Knowing about why a block terminated can be important, specify error messages here.",
   totpVerificationUrl:
-    "If you have an internal system for storing TOTP codes, link the endpoint here.",
+    "If you do not have a TOTP Identifier at hand, but do have an internal system for storing TOTP codes, link the endpoint here.",
   totpIdentifier:
     "If you are running multiple workflows at once, you will need to give the block an identifier to know that this TOTP goes with this block.",
   continueOnFailure:
     "Allow the workflow to continue if it encounters a failure.",
   cacheActions: "Cache the actions of this block.",
+  includeActionHistoryInVerification:
+    "Include the action history in the completion verification.",
 } as const;
 
 export const basePlaceholderContent = {
@@ -81,6 +83,17 @@ export const helpTooltips = {
     ...baseHelpTooltipContent,
     path: "Since we're in beta this section isn't fully customizable yet, contact us if you'd like to integrate it into your workflow.",
   },
+  fileUpload: {
+    ...baseHelpTooltipContent,
+    path: "The path of the folder to upload the files to.",
+    storage_type:
+      "The type of storage to upload the file to. Currently only S3 is supported. Please contact us if you'd like to integrate other storage types.",
+    s3_bucket: "The S3 bucket to upload the file to.",
+    aws_access_key_id: "The AWS access key ID to use to upload the file to S3.",
+    aws_secret_access_key:
+      "The AWS secret access key to use to upload the file to S3.",
+    region_name: "The AWS region",
+  },
   download: {
     ...baseHelpTooltipContent,
     url: "Since we're in beta this section isn't fully customizable yet, contact us if you'd like to integrate it into your workflow.",
@@ -136,6 +149,7 @@ export const placeholders = {
   loop: basePlaceholderContent,
   sendEmail: basePlaceholderContent,
   upload: basePlaceholderContent,
+  fileUpload: basePlaceholderContent,
   download: basePlaceholderContent,
   codeBlock: basePlaceholderContent,
   fileUrl: basePlaceholderContent,

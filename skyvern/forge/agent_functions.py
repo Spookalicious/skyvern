@@ -9,7 +9,7 @@ from playwright.async_api import Frame, Page
 
 from skyvern.config import settings
 from skyvern.constants import SKYVERN_ID_ATTR
-from skyvern.exceptions import StepUnableToExecuteError, TaskAlreadyTimeout
+from skyvern.exceptions import DisabledBlockExecutionError, StepUnableToExecuteError, TaskAlreadyTimeout
 from skyvern.forge import app
 from skyvern.forge.async_operations import AsyncOperation
 from skyvern.forge.prompts import prompt_engine
@@ -26,6 +26,7 @@ from skyvern.webeye.utils.page import SkyvernFrame
 
 LOG = structlog.get_logger()
 
+_LLM_CALL_TIMEOUT_SECONDS = 30  # 30s
 USELESS_SHAPE_ATTRIBUTE = [SKYVERN_ID_ATTR, "id", "aria-describedby"]
 SVG_SHAPE_CONVERTION_ATTEMPTS = 3
 CSS_SHAPE_CONVERTION_ATTEMPTS = 1
@@ -105,17 +106,29 @@ def _remove_skyvern_attributes(element: Dict) -> Dict:
     return element_copied
 
 
-async def _convert_svg_to_string(
+def _mark_element_as_dropped(element: dict) -> None:
+    if "children" in element:
+        del element["children"]
+    element["isDropped"] = True
+
+
+async def _check_svg_eligibility(
     skyvern_frame: SkyvernFrame,
     element: Dict,
     task: Task | None = None,
     step: Step | None = None,
-) -> None:
+    always_drop: bool = False,
+) -> bool:
+    """Check if an SVG element is eligible for conversion."""
     if element.get("tagName") != "svg":
-        return
+        return False
 
     if element.get("isDropped", False):
-        return
+        return False
+
+    if always_drop:
+        _mark_element_as_dropped(element)
+        return False
 
     task_id = task.task_id if task else None
     step_id = step.step_id if step else None
@@ -124,22 +137,21 @@ async def _convert_svg_to_string(
     try:
         locater = skyvern_frame.get_frame().locator(f'[{SKYVERN_ID_ATTR}="{element_id}"]')
         if await locater.count() == 0:
-            del element["children"]
-            element["isDropped"] = True
-            return
+            _mark_element_as_dropped(element)
+            return False
 
         if not await locater.is_visible(timeout=settings.BROWSER_ACTION_TIMEOUT_MS):
-            del element["children"]
-            element["isDropped"] = True
-            return
+            _mark_element_as_dropped(element)
+            return False
 
         skyvern_element = SkyvernElement(locator=locater, frame=skyvern_frame.get_frame(), static_element=element)
 
-        _, blocked = await skyvern_frame.get_blocking_element_id(await skyvern_element.get_element_handler())
+        _, blocked = await skyvern_frame.get_blocking_element_id(
+            await skyvern_element.get_element_handler(timeout=1000)
+        )
         if not skyvern_element.is_interactable() and blocked:
-            del element["children"]
-            element["isDropped"] = True
-            return
+            _mark_element_as_dropped(element)
+            return False
     except Exception:
         LOG.warning(
             "Failed to get the blocking element for the svg, going to continue parsing the svg",
@@ -147,6 +159,19 @@ async def _convert_svg_to_string(
             task_id=task_id,
             step_id=step_id,
         )
+
+    return True
+
+
+async def _convert_svg_to_string(
+    element: Dict,
+    task: Task | None = None,
+    step: Step | None = None,
+) -> None:
+    """Convert an SVG element to a string description. Assumes element has already passed eligibility checks."""
+    task_id = task.task_id if task else None
+    step_id = step.step_id if step else None
+    element_id = element.get("id", "")
 
     svg_element = _remove_skyvern_attributes(element)
     svg_html = json_to_html(svg_element)
@@ -180,8 +205,7 @@ async def _convert_svg_to_string(
                 length=len(svg_html),
                 key=svg_key,
             )
-            del element["children"]
-            element["isDropped"] = True
+            _mark_element_as_dropped(element)
             return
 
         LOG.debug("call LLM to convert SVG to string shape", element_id=element_id)
@@ -189,9 +213,10 @@ async def _convert_svg_to_string(
 
         for retry in range(SVG_SHAPE_CONVERTION_ATTEMPTS):
             try:
-                json_response = await app.SECONDARY_LLM_API_HANDLER(
-                    prompt=svg_convert_prompt, step=step, prompt_name="svg-convert"
-                )
+                async with asyncio.timeout(_LLM_CALL_TIMEOUT_SECONDS):
+                    json_response = await app.SECONDARY_LLM_API_HANDLER(
+                        prompt=svg_convert_prompt, step=step, prompt_name="svg-convert"
+                    )
                 svg_shape = json_response.get("shape", "")
                 recognized = json_response.get("recognized", False)
                 if not svg_shape or not recognized:
@@ -213,6 +238,14 @@ async def _convert_svg_to_string(
                     # set the invalid css shape to cache to avoid retry in the near future
                     await app.CACHE.set(svg_key, INVALID_SHAPE, ex=timedelta(hours=1))
                 await asyncio.sleep(3)
+            except asyncio.TimeoutError:
+                LOG.warning(
+                    "Timeout to call LLM to parse SVG. Going to drop the svg element directly.",
+                    element_id=element_id,
+                    key=svg_key,
+                )
+                _mark_element_as_dropped(element)
+                return
             except Exception:
                 LOG.info(
                     "Failed to convert SVG to string shape by secondary llm. Will retry if haven't met the max try attempt after 3s.",
@@ -235,8 +268,7 @@ async def _convert_svg_to_string(
                 key=svg_key,
                 length=len(svg_html),
             )
-            del element["children"]
-            element["isDropped"] = True
+            _mark_element_as_dropped(element)
             return
 
     element["attributes"] = dict()
@@ -244,7 +276,8 @@ async def _convert_svg_to_string(
         # refresh the cache expiration
         await app.CACHE.set(svg_key, svg_shape)
         element["attributes"]["alt"] = svg_shape
-    del element["children"]
+    if "children" in element:
+        del element["children"]
     return
 
 
@@ -305,7 +338,7 @@ async def _convert_css_shape_to_string(
 
             _, blocked = await skyvern_frame.get_blocking_element_id(await skyvern_element.get_element_handler())
             if blocked:
-                LOG.info(
+                LOG.debug(
                     "element is blocked by another element, going to abort conversion",
                     task_id=task_id,
                     step_id=step_id,
@@ -314,16 +347,31 @@ async def _convert_css_shape_to_string(
                 )
                 return None
 
+            try:
+                await locater.scroll_into_view_if_needed(timeout=settings.BROWSER_ACTION_TIMEOUT_MS)
+                await locater.wait_for(state="visible", timeout=settings.BROWSER_ACTION_TIMEOUT_MS)
+            except Exception:
+                LOG.info(
+                    "Failed to make the element visible, going to abort conversion",
+                    exc_info=True,
+                    task_id=task_id,
+                    step_id=step_id,
+                    element_id=element_id,
+                    key=shape_key,
+                )
+                return None
+
             LOG.debug("call LLM to convert css shape to string shape", element_id=element_id)
-            screenshot = await locater.screenshot(timeout=settings.BROWSER_ACTION_TIMEOUT_MS)
+            screenshot = await locater.screenshot(timeout=settings.BROWSER_ACTION_TIMEOUT_MS, animations="disabled")
             prompt = prompt_engine.load_prompt("css-shape-convert")
 
             # TODO: we don't retry the css shape conversion today
             for retry in range(CSS_SHAPE_CONVERTION_ATTEMPTS):
                 try:
-                    json_response = await app.SECONDARY_LLM_API_HANDLER(
-                        prompt=prompt, screenshots=[screenshot], step=step, prompt_name="css-shape-convert"
-                    )
+                    async with asyncio.timeout(_LLM_CALL_TIMEOUT_SECONDS):
+                        json_response = await app.SECONDARY_LLM_API_HANDLER(
+                            prompt=prompt, screenshots=[screenshot], step=step, prompt_name="css-shape-convert"
+                        )
                     css_shape = json_response.get("shape", "")
                     recognized = json_response.get("recognized", False)
                     if not css_shape or not recognized:
@@ -345,6 +393,13 @@ async def _convert_css_shape_to_string(
                         # set the invalid css shape to cache to avoid retry in the near future
                         await app.CACHE.set(shape_key, INVALID_SHAPE, ex=timedelta(hours=1))
                     await asyncio.sleep(3)
+                except asyncio.TimeoutError:
+                    LOG.warning(
+                        "Timeout to call LLM to parse css shape. Going to abort the convertion directly.",
+                        element_id=element_id,
+                        key=shape_key,
+                    )
+                    return None
                 except Exception:
                     LOG.info(
                         "Failed to convert css shape to string shape by secondary llm. Will retry if haven't met the max try attempt after 3s.",
@@ -426,7 +481,7 @@ class AgentFunction:
         return
 
     async def validate_task_execution(
-        self, organization_id: str | None = None, task_id: str | None = None, task_version: str | None = None
+        self, organization_id: str, task_id: str | None = None, task_version: str | None = None
     ) -> None:
         return
 
@@ -458,6 +513,8 @@ class AgentFunction:
         task: Task | None = None,
         step: Step | None = None,
     ) -> CleanupElementTreeFunc:
+        MAX_ELEMENT_CNT = 3000
+
         async def cleanup_element_tree_func(frame: Page | Frame, url: str, element_tree: list[dict]) -> list[dict]:
             """
             Remove rect and attribute.unique_id from the elements.
@@ -473,10 +530,22 @@ class AgentFunction:
             current_frame_index = context.frame_index_map.get(frame, 0)
 
             queue = []
+            element_cnt = 0
+            eligible_svgs = []  # List to store eligible SVGs and their frames
+
             for element in element_tree:
                 queue.append(element)
+
             while queue:
                 queue_ele = queue.pop(0)
+
+                element_cnt += 1
+                if element_cnt == MAX_ELEMENT_CNT:
+                    LOG.warning(
+                        f"Element reached max count {MAX_ELEMENT_CNT}, will stop converting svg and css element."
+                    )
+                element_exceeded = element_cnt > MAX_ELEMENT_CNT
+
                 if queue_ele.get("frame_index") != current_frame_index:
                     new_frame = next(
                         (k for k, v in context.frame_index_map.items() if v == queue_ele.get("frame_index")), frame
@@ -485,9 +554,12 @@ class AgentFunction:
                     current_frame_index = queue_ele.get("frame_index", 0)
 
                 _remove_rect(queue_ele)
-                await _convert_svg_to_string(skyvern_frame, queue_ele, task, step)
 
-                if _should_css_shape_convert(element=queue_ele):
+                # Check SVG eligibility and store for later conversion
+                if await _check_svg_eligibility(skyvern_frame, queue_ele, task, step, always_drop=element_exceeded):
+                    eligible_svgs.append((queue_ele, skyvern_frame))
+
+                if not element_exceeded and _should_css_shape_convert(element=queue_ele):
                     await _convert_css_shape_to_string(
                         skyvern_frame=skyvern_frame,
                         element=queue_ele,
@@ -500,6 +572,15 @@ class AgentFunction:
                 # _remove_unique_id(queue_ele)
                 if "children" in queue_ele:
                     queue.extend(queue_ele["children"])
+
+            # Convert all eligible SVGs in parallel
+            if eligible_svgs:
+                await asyncio.gather(*[_convert_svg_to_string(element, task, step) for element, frame in eligible_svgs])
+
             return element_tree
 
         return cleanup_element_tree_func
+
+    async def validate_code_block(self, organization_id: str | None = None) -> None:
+        if not settings.ENABLE_CODE_BLOCK:
+            raise DisabledBlockExecutionError("CodeBlock is disabled")

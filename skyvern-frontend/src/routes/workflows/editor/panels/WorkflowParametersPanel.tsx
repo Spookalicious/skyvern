@@ -31,6 +31,7 @@ import {
   WorkflowEditorParameterType,
   WorkflowEditorParameterTypes,
 } from "../../types/workflowTypes";
+import { getLabelForWorkflowParameterType } from "../workflowEditorUtils";
 
 const WORKFLOW_EDIT_PANEL_WIDTH = 20 * 16;
 const WORKFLOW_EDIT_PANEL_GAP = 1 * 16;
@@ -116,7 +117,7 @@ function WorkflowParametersPanel() {
                 });
               }}
             >
-              Credit Card Data Parameter
+              Credit Card Parameter
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -128,13 +129,15 @@ function WorkflowParametersPanel() {
                 return (
                   <div
                     key={parameter.key}
-                    className="flex items-center justify-between rounded-md bg-slate-elevation1 px-3 py-2"
+                    className="flex items-center justify-between gap-2 rounded-md bg-slate-elevation1 px-3 py-2"
                   >
-                    <div className="flex items-center gap-4">
-                      <span className="text-sm">{parameter.key}</span>
+                    <div className="flex min-w-0 items-center gap-4">
+                      <span className="truncate text-sm" title={parameter.key}>
+                        {parameter.key}
+                      </span>
                       {parameter.parameterType === "workflow" ? (
                         <span className="text-sm text-slate-400">
-                          {parameter.dataType}
+                          {getLabelForWorkflowParameterType(parameter.dataType)}
                         </span>
                       ) : (
                         <span className="text-sm text-slate-400">
@@ -150,7 +153,10 @@ function WorkflowParametersPanel() {
                             active: true,
                             operation: "edit",
                             parameter: parameter,
-                            type: parameter.parameterType,
+                            type:
+                              parameter.parameterType === "onepassword"
+                                ? WorkflowEditorParameterTypes.Credential
+                                : parameter.parameterType,
                           });
                         }}
                       />

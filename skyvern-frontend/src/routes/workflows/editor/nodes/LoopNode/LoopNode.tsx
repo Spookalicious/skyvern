@@ -21,10 +21,15 @@ import type { LoopNode } from "./types";
 import { useState } from "react";
 import { useIsFirstBlockInWorkflow } from "../../hooks/useIsFirstNodeInWorkflow";
 import { Checkbox } from "@/components/ui/checkbox";
+import { getLoopNodeWidth } from "../../workflowEditorUtils";
 
 function LoopNode({ id, data }: NodeProps<LoopNode>) {
   const { updateNodeData } = useReactFlow();
   const nodes = useNodes<AppNode>();
+  const node = nodes.find((n) => n.id === id);
+  if (!node) {
+    throw new Error("Node not found"); // not possible
+  }
   const [label, setLabel] = useNodeLabelChangeHandler({
     id,
     initialValue: data.label,
@@ -55,6 +60,7 @@ function LoopNode({ id, data }: NodeProps<LoopNode>) {
     (furthestDownChild?.position.y ?? 0) +
     24;
 
+  const loopNodeWidth = getLoopNodeWidth(node, nodes);
   function handleChange(key: string, value: unknown) {
     if (!data.editable) {
       return;
@@ -78,8 +84,9 @@ function LoopNode({ id, data }: NodeProps<LoopNode>) {
         className="opacity-0"
       />
       <div
-        className="w-[600px] rounded-xl border-2 border-dashed border-slate-600 p-2"
+        className="rounded-xl border-2 border-dashed border-slate-600 p-2"
         style={{
+          width: loopNodeWidth,
           height: childrenHeightExtent,
         }}
       >
@@ -132,20 +139,34 @@ function LoopNode({ id, data }: NodeProps<LoopNode>) {
             </div>
             <div className="space-y-2">
               <div className="space-y-2">
-                <div className="flex gap-4">
-                  <div className="flex gap-2">
+                <div className="flex justify-between">
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      checked={data.completeIfEmpty}
+                      disabled={!data.editable}
+                      onCheckedChange={(checked) => {
+                        handleChange("completeIfEmpty", checked);
+                      }}
+                    />
                     <Label className="text-xs text-slate-300">
-                      Complete if Empty
+                      Continue if Empty
                     </Label>
-                    <HelpTooltip content="When checked, this block will successfully complete when the loop value is an empty list" />
+                    <HelpTooltip content="When checked, the for loop block will successfully complete and workflow execution will continue if the loop value is empty" />
                   </div>
-                  <Checkbox
-                    checked={data.completeIfEmpty}
-                    disabled={!data.editable}
-                    onCheckedChange={(checked) => {
-                      handleChange("completeIfEmpty", checked);
-                    }}
-                  />
+
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      checked={data.continueOnFailure}
+                      disabled={!data.editable}
+                      onCheckedChange={(checked) => {
+                        handleChange("continueOnFailure", checked);
+                      }}
+                    />
+                    <Label className="text-xs text-slate-300">
+                      Continue on Failure
+                    </Label>
+                    <HelpTooltip content="When checked, the loop will continue executing even if one of its iterations fails" />
+                  </div>
                 </div>
               </div>
             </div>

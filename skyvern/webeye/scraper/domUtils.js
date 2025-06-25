@@ -1,6 +1,10 @@
 // we only use chromium browser for now
 let browserNameForWorkarounds = "chromium";
 
+let _jsConsoleLog = console?.log ?? function () {}; // prevent no console.log error
+let _jsConsoleError = console?.error ?? _jsConsoleLog;
+let _jsConsoleWarn = console?.warn ?? _jsConsoleLog;
+
 class SafeCounter {
   constructor() {
     this.value = 0;
@@ -273,6 +277,7 @@ function hasASPClientControl() {
 }
 
 // from playwright: https://github.com/microsoft/playwright/blob/1b65f26f0287c0352e76673bc5f85bc36c934b55/packages/playwright-core/src/server/injected/domUtils.ts#L100-L119
+// NOTE: According this logic, some elements with aria-hidden won't be considered as invisible. And the result shows they are indeed interactable.
 function isElementVisible(element) {
   // TODO: This is a hack to not check visibility for option elements
   // because they are not visible by default. We check their parent instead for visibility.
@@ -439,6 +444,14 @@ function expectHitTarget(hitPoint, targetElement) {
   return hitParents[0] || document.documentElement;
 }
 
+function getChildElements(element) {
+  if (element.childElementCount !== 0) {
+    return Array.from(element.children);
+  } else {
+    return [];
+  }
+}
+
 function isParent(parent, child) {
   return parent.contains(child);
 }
@@ -513,6 +526,20 @@ function isReadonlyElement(element) {
   return false;
 }
 
+function isDropdownRelatedElement(element) {
+  const tagName = element.tagName?.toLowerCase();
+  if (tagName === "select") {
+    return true;
+  }
+
+  const role = element.getAttribute("role")?.toLowerCase();
+  if (role === "option" || role === "listbox") {
+    return true;
+  }
+
+  return false;
+}
+
 function hasAngularClickBinding(element) {
   return (
     element.hasAttribute("ng-click") || element.hasAttribute("data-ng-click")
@@ -545,6 +572,7 @@ function hasWidgetRole(element) {
     "spinbutton",
     "switch",
     "gridcell",
+    "option",
   ];
   return widgetRoles.includes(role.toLowerCase().trim());
 }
@@ -565,7 +593,57 @@ function isTableRelatedElement(element) {
   ].includes(tagName);
 }
 
-function isInteractableInput(element) {
+function isDOMNodeRepresentDiv(element) {
+  if (element?.tagName?.toLowerCase() !== "div") {
+    return false;
+  }
+  const style = getElementComputedStyle(element);
+  const children = getChildElements(element);
+  // flex ususally means there are multiple elements in the div as a line or a column
+  // if the children elements are not just one, we should keep it in the HTML tree to represent a tree structure
+  if (style?.display === "flex" && children.length > 1) {
+    return true;
+  }
+  return false;
+}
+
+function isHoverPointerElement(element, hoverStylesMap) {
+  const tagName = element.tagName.toLowerCase();
+  const elementClassName = element.className.toString();
+  const elementCursor = getElementComputedStyle(element)?.cursor;
+  if (elementCursor === "pointer") {
+    return true;
+  }
+
+  // Check if element has hover styles that change cursor to pointer
+  // This is to handle the case where an element's cursor is "auto", but resolves to "pointer" on hover
+  if (elementCursor === "auto") {
+    // TODO: we need a better algorithm to match the selector with better performance
+    for (const [selector, styles] of hoverStylesMap) {
+      let shouldMatch = false;
+      for (const className of element.classList) {
+        if (selector.includes(className)) {
+          shouldMatch = true;
+          break;
+        }
+      }
+      if (shouldMatch || selector.includes(tagName)) {
+        if (element.matches(selector) && styles.cursor === "pointer") {
+          return true;
+        }
+      }
+    }
+  }
+
+  // FIXME: hardcode to fix the bug about hover style now
+  if (elementClassName.includes("hover:cursor-pointer")) {
+    return true;
+  }
+
+  return false;
+}
+
+function isInteractableInput(element, hoverStylesMap) {
   const tagName = element.tagName.toLowerCase();
   if (tagName !== "input") {
     // let other checks decide
@@ -577,7 +655,10 @@ function isInteractableInput(element) {
   // "city", "state", "zip", "country"
   // That's the reason I (Kerem) removed the valid input types check
   var type = element.getAttribute("type")?.toLowerCase().trim() ?? "text";
-  return !isReadonlyElement(element) && type !== "hidden";
+  return (
+    isHoverPointerElement(element, hoverStylesMap) ||
+    (!isReadonlyElement(element) && type !== "hidden")
+  );
 }
 
 function isValidCSSSelector(selector) {
@@ -590,9 +671,6 @@ function isValidCSSSelector(selector) {
 }
 
 function isInteractable(element, hoverStylesMap) {
-  if (element.shadowRoot) {
-    return false;
-  }
   if (!isElementVisible(element)) {
     return false;
   }
@@ -605,18 +683,19 @@ function isInteractable(element, hoverStylesMap) {
     return false;
   }
 
-  // element with pointer-events: none should not be considered as interactable
-  // https://developer.mozilla.org/en-US/docs/Web/CSS/pointer-events#none
-  const elementPointerEvent = getElementComputedStyle(element)?.pointerEvents;
-  if (elementPointerEvent === "none") {
-    return false;
-  }
-
   if (hasWidgetRole(element)) {
     return true;
   }
 
-  if (isInteractableInput(element)) {
+  // element with pointer-events: none should not be considered as interactable
+  // but for elements which are disabled, we should not use this logic to test the interactable
+  // https://developer.mozilla.org/en-US/docs/Web/CSS/pointer-events#none
+  const elementPointerEvent = getElementComputedStyle(element)?.pointerEvents;
+  if (elementPointerEvent === "none" && !element.disabled) {
+    return false;
+  }
+
+  if (isInteractableInput(element, hoverStylesMap)) {
     return true;
   }
 
@@ -664,16 +743,18 @@ function isInteractable(element, hoverStylesMap) {
     return true;
   }
 
+  const className = element.className.toString();
+
   if (tagName === "div" || tagName === "span") {
     if (hasAngularClickBinding(element)) {
       return true;
     }
-    if (element.className.toString().includes("blinking-cursor")) {
+    if (className.includes("blinking-cursor")) {
       return true;
     }
     // https://www.oxygenxml.com/dita/1.3/specs/langRef/technicalContent/svg-container.html
     // svg-container is usually used for clickable elements that wrap SVGs
-    if (element.className.toString().includes("svg-container")) {
+    if (className.includes("svg-container")) {
       return true;
     }
   }
@@ -697,7 +778,7 @@ function isInteractable(element, hoverStylesMap) {
 
   if (
     tagName === "li" &&
-    element.className.toString().includes("ui-menu-item")
+    (className.includes("ui-menu-item") || className.includes("dropdown-item"))
   ) {
     return true;
   }
@@ -707,7 +788,7 @@ function isInteractable(element, hoverStylesMap) {
   // demo: https://developers.google.com/maps/documentation/javascript/examples/places-autocomplete-addressform
   if (
     tagName === "div" &&
-    element.className.toString().includes("pac-item") &&
+    className.includes("pac-item") &&
     element.closest('div[class*="pac-container"]')
   ) {
     return true;
@@ -734,35 +815,10 @@ function isInteractable(element, hoverStylesMap) {
     tagName === "li" ||
     tagName === "p" ||
     tagName === "td" ||
-    tagName === "svg"
+    tagName === "svg" ||
+    tagName === "strong"
   ) {
-    const elementCursor = getElementComputedStyle(element)?.cursor;
-    if (elementCursor === "pointer") {
-      return true;
-    }
-
-    // Check if element has hover styles that change cursor to pointer
-    // This is to handle the case where an element's cursor is "auto", but resolves to "pointer" on hover
-    if (elementCursor === "auto") {
-      // TODO: we need a better algorithm to match the selector with better performance
-      for (const [selector, styles] of hoverStylesMap) {
-        let shouldMatch = false;
-        for (const className of element.classList) {
-          if (selector.includes(className)) {
-            shouldMatch = true;
-            break;
-          }
-        }
-        if (shouldMatch || selector.includes(tagName)) {
-          if (element.matches(selector) && styles.cursor === "pointer") {
-            return true;
-          }
-        }
-      }
-    }
-
-    // FIXME: hardcode to fix the bug about hover style now
-    if (element.className.toString().includes("hover:cursor-pointer")) {
+    if (isHoverPointerElement(element, hoverStylesMap)) {
       return true;
     }
   }
@@ -770,6 +826,22 @@ function isInteractable(element, hoverStylesMap) {
   if (hasASPClientControl() && tagName === "tr") {
     return true;
   }
+
+  if (tagName === "div" && element.hasAttribute("data-selectable")) {
+    return true;
+  }
+
+  try {
+    if (window.jQuery && window.jQuery._data) {
+      const events = window.jQuery._data(element, "events");
+      if (events && "click" in events) {
+        return true;
+      }
+    }
+  } catch (e) {
+    _jsConsoleError("Error getting jQuery click events:", e);
+  }
+
   return false;
 }
 
@@ -805,21 +877,6 @@ function isDatePickerSelector(element) {
   if (
     tagName === "button" &&
     element.getAttribute("data-testid")?.includes("date")
-  ) {
-    return true;
-  }
-  return false;
-}
-
-function isCheckableDiv(element) {
-  const tagName = element.tagName.toLowerCase();
-  if (tagName !== "div") {
-    return false;
-  }
-  if (
-    element.className &&
-    element.className.toString().includes("checkbox") &&
-    element.childElementCount === 0
   ) {
     return true;
   }
@@ -920,6 +977,19 @@ function hasNgAttribute(element) {
   return false;
 }
 
+function isAngularMaterial(element) {
+  if (!element.attributes[Symbol.iterator]) {
+    return false;
+  }
+
+  for (let attr of element.attributes) {
+    if (attr.name.startsWith("mat")) {
+      return true;
+    }
+  }
+  return false;
+}
+
 const isAngularDropdown = (element) => {
   if (!hasNgAttribute(element)) {
     return false;
@@ -934,6 +1004,20 @@ const isAngularDropdown = (element) => {
   }
 
   return false;
+};
+
+const isAngularMaterialDatePicker = (element) => {
+  if (!isAngularMaterial(element)) {
+    return false;
+  }
+
+  const tagName = element.tagName.toLowerCase();
+  if (tagName !== "input") return false;
+
+  return (
+    (element.closest("mat-datepicker") ||
+      element.closest("mat-formio-date")) !== null
+  );
 };
 
 function getPseudoContent(element, pseudo) {
@@ -1125,7 +1209,7 @@ function getElementContent(element, skipped_element = null) {
         // childText = child.textContent.trim();
         childText = getElementContent(child, skipped_element);
       } else {
-        console.log("Unhandled node type: ", child.nodeType);
+        _jsConsoleLog("Unhandled node type: ", child.nodeType);
       }
       if (childText.length > 0) {
         childTextContentList.push(childText);
@@ -1175,7 +1259,7 @@ function getDOMElementBySkyvenElement(elementObj) {
       `[unique_id="${elementObj.shadowHost}"]`,
     );
     if (!shadowHostEle) {
-      console.log(
+      _jsConsoleLog(
         "Could not find shadowHost element with unique_id: ",
         elementObj.shadowHost,
       );
@@ -1263,7 +1347,7 @@ async function buildElementObject(
       attrs[attr.name] = attrValue;
     }
   } else {
-    console.warn(
+    _jsConsoleWarn(
       "element.attributes is not iterable. element_id=" + element_id,
     );
   }
@@ -1282,16 +1366,6 @@ async function buildElementObject(
     !attrs["aria-required"]
   ) {
     attrs["required"] = true;
-  }
-
-  if (
-    elementTagNameLower === "input" &&
-    (element.type === "radio" || element.type === "checkbox")
-  ) {
-    // if checkbox and radio don't have "checked" and "aria-checked", add a checked="false" to help LLM understand
-    if (!("checked" in attrs) && !("aria-checked" in attrs)) {
-      attrs["checked"] = false;
-    }
   }
 
   if (elementTagNameLower === "input" || elementTagNameLower === "textarea") {
@@ -1325,9 +1399,9 @@ async function buildElementObject(
       isDivComboboxDropdown(element) ||
       isDropdownButton(element) ||
       isAngularDropdown(element) ||
+      isAngularMaterialDatePicker(element) ||
       isSelect2Dropdown(element) ||
       isSelect2MultiChoice(element),
-    isCheckable: isCheckableDiv(element),
   };
 
   let isInShadowRoot = element.getRootNode() instanceof ShadowRoot;
@@ -1377,42 +1451,58 @@ async function buildElementTree(
   starter = document.body,
   frame,
   full_tree = false,
+  needContext = true,
+  hoverStylesMap = undefined,
 ) {
   // Generate hover styles map at the start
-  const hoverStylesMap = getHoverStylesMap();
+  if (hoverStylesMap === undefined) {
+    hoverStylesMap = await getHoverStylesMap();
+  }
 
   var elements = [];
   var resultArray = [];
 
-  function getChildElements(element) {
-    if (element.childElementCount !== 0) {
-      return Array.from(element.children);
-    } else {
-      return [];
-    }
-  }
-  async function processElement(element, parentId) {
+  async function processElement(
+    element,
+    parentId,
+    parent_xpath,
+    current_node_index,
+  ) {
     if (element === null) {
-      console.log("get a null element");
+      _jsConsoleLog("get a null element");
       return;
     }
 
-    const tagName = element.tagName.toLowerCase();
+    const tagName = element.tagName?.toLowerCase();
+    if (!tagName) {
+      _jsConsoleLog("get a null tagName");
+      return;
+    }
 
     // skip proccessing option element as they are already added to the select.options
     if (tagName === "option") {
       return;
     }
 
-    // if element is an "a" tag and has a target="_blank" attribute, remove the target attribute
-    // We're doing this so that skyvern can do all the navigation in a single page/tab and not open new tab
-    if (tagName === "a") {
-      if (element.getAttribute("target") === "_blank") {
-        element.removeAttribute("target");
-      }
+    let current_xpath = null;
+    if (parent_xpath) {
+      // ignore the namespace, otherwise the xpath sometimes won't find anything, specially for SVG elements
+      current_xpath =
+        parent_xpath +
+        "/" +
+        '*[name()="' +
+        tagName +
+        '"]' +
+        "[" +
+        current_node_index +
+        "]";
     }
 
-    let children = [];
+    let shadowDOMchildren = [];
+    // sometimes the shadowRoot is not visible, but the elemnets in the shadowRoot are visible
+    if (element.shadowRoot) {
+      shadowDOMchildren = getChildElements(element.shadowRoot);
+    }
     const isVisible = isElementVisible(element);
     if (isVisible && !isHidden(element) && !isScriptOrStyle(element)) {
       const interactable = isInteractable(element, hoverStylesMap);
@@ -1428,7 +1518,6 @@ async function buildElementTree(
         elementObj = await buildElementObject(frame, element, interactable);
       } else if (element.shadowRoot) {
         elementObj = await buildElementObject(frame, element, interactable);
-        children = getChildElements(element.shadowRoot);
       } else if (isTableRelatedElement(element)) {
         // build all table related elements into skyvern element
         // we need these elements to preserve the DOM structure
@@ -1442,6 +1531,8 @@ async function buildElementTree(
         isParentSVG.getAttribute("unique_id")
       ) {
         // if elemnet is the children of the <svg> with an unique_id
+        elementObj = await buildElementObject(frame, element, interactable);
+      } else if (tagName === "div" && isDOMNodeRepresentDiv(element)) {
         elementObj = await buildElementObject(frame, element, interactable);
       } else if (
         getElementText(element).length > 0 &&
@@ -1463,6 +1554,7 @@ async function buildElementTree(
       }
 
       if (elementObj) {
+        elementObj.xpath = current_xpath;
         elements.push(elementObj);
         // If the element is interactable but has no interactable parent,
         // then it starts a new tree, so add it to the result array
@@ -1483,10 +1575,35 @@ async function buildElementTree(
       }
     }
 
-    children = children.concat(getChildElements(element));
+    const children = getChildElements(element);
+    const xpathMap = new Map();
+
     for (let i = 0; i < children.length; i++) {
       const childElement = children[i];
-      await processElement(childElement, parentId);
+      const tagName = childElement?.tagName?.toLowerCase();
+      if (!tagName) {
+        _jsConsoleLog("get a null tagName");
+        continue;
+      }
+      let current_node_index = xpathMap.get(tagName);
+      if (current_node_index == undefined) {
+        current_node_index = 1;
+      } else {
+        current_node_index = current_node_index + 1;
+      }
+      xpathMap.set(tagName, current_node_index);
+      await processElement(
+        childElement,
+        parentId,
+        current_xpath,
+        current_node_index,
+      );
+    }
+
+    // FIXME: xpath won't work when the element is in shadow DOM
+    for (let i = 0; i < shadowDOMchildren.length; i++) {
+      const childElement = shadowDOMchildren[i];
+      await processElement(childElement, parentId, null, 0);
     }
     return;
   }
@@ -1556,7 +1673,7 @@ async function buildElementTree(
           ...document.querySelectorAll(`label[for="${elementId}"]`),
         ];
       } catch (e) {
-        console.log("failed to query labels: ", e);
+        _jsConsoleLog("failed to query labels: ", e);
       }
     }
     const labelled = currentEle.getAttribute("aria-labelledby");
@@ -1695,8 +1812,13 @@ async function buildElementTree(
     return trimmedResults;
   };
 
+  let current_xpath = null;
+  if (starter === document.body) {
+    current_xpath = "/html[1]";
+  }
+
   // setup before parsing the dom
-  await processElement(starter, null);
+  await processElement(starter, null, current_xpath, 1);
 
   for (var element of elements) {
     if (
@@ -1706,42 +1828,43 @@ async function buildElementTree(
       element.attributes.value === ""
     ) {
       // TODO (kerem): we may want to pass these elements to the LLM as empty but required fields in the future
-      console.log(
+      _jsConsoleLog(
         "input element with required attribute and no value",
         element,
       );
     }
 
     let ctxList = [];
-    try {
-      ctxList = getContextByLinked(element, ctxList);
-    } catch (e) {
-      console.error("failed to get context by linked: ", e);
-    }
+    if (needContext) {
+      try {
+        ctxList = getContextByLinked(element, ctxList);
+      } catch (e) {
+        _jsConsoleError("failed to get context by linked: ", e);
+      }
 
-    try {
-      ctxList = getContextByParent(element, ctxList);
-    } catch (e) {
-      console.error("failed to get context by parent: ", e);
-    }
+      try {
+        ctxList = getContextByParent(element, ctxList);
+      } catch (e) {
+        _jsConsoleError("failed to get context by parent: ", e);
+      }
 
-    try {
-      ctxList = getContextByTable(element, ctxList);
-    } catch (e) {
-      console.error("failed to get context by table: ", e);
-    }
-    const context = ctxList.join(";");
-    if (context && context.length <= 5000) {
-      element.context = context;
-    }
-
-    // FIXME: skip <a> for now to prevent navigating to other page by mistake
-    if (element.tagName !== "a" && checkStringIncludeRequire(context)) {
-      if (
-        !element.attributes["required"] &&
-        !element.attributes["aria-required"]
-      ) {
-        element.attributes["required"] = true;
+      try {
+        ctxList = getContextByTable(element, ctxList);
+      } catch (e) {
+        _jsConsoleError("failed to get context by table: ", e);
+      }
+      const context = ctxList.join(";");
+      if (context && context.length <= 5000) {
+        element.context = context;
+      }
+      // FIXME: skip <a> for now to prevent navigating to other page by mistake
+      if (element.tagName !== "a" && checkStringIncludeRequire(context)) {
+        if (
+          !element.attributes["required"] &&
+          !element.attributes["aria-required"]
+        ) {
+          element.attributes["required"] = true;
+        }
       }
     }
   }
@@ -1749,7 +1872,9 @@ async function buildElementTree(
   resultArray = removeOrphanNode(resultArray);
   resultArray.forEach((root) => {
     trimDuplicatedText(root);
-    trimDuplicatedContext(root);
+    if (needContext) {
+      trimDuplicatedContext(root);
+    }
   });
 
   return [elements, resultArray];
@@ -1771,7 +1896,7 @@ async function buildElementsAndDrawBoundingBoxes(
 }
 
 function captchaSolvedCallback() {
-  console.log("captcha solved");
+  _jsConsoleLog("captcha solved");
   if (!window["captchaSolvedCounter"]) {
     window["captchaSolvedCounter"] = 0;
   }
@@ -1849,7 +1974,7 @@ function generateHintStrings(count) {
 
 function createHintMarkersForGroups(groups) {
   if (groups.length === 0) {
-    console.log("No groups found, not adding hint markers to page.");
+    _jsConsoleLog("No groups found, not adding hint markers to page.");
     return [];
   }
 
@@ -1880,14 +2005,19 @@ function createHintMarkersForGroups(groups) {
     } catch (e) {
       // Ensure trustedTypes is available
       if (typeof trustedTypes !== "undefined") {
-        const escapeHTMLPolicy = trustedTypes.createPolicy("default", {
-          createHTML: (string) => string,
-        });
-        hintMarker.element.innerHTML = escapeHTMLPolicy.createHTML(
-          hintMarker.hintString.toUpperCase(),
-        );
+        try {
+          const escapeHTMLPolicy = trustedTypes.createPolicy("hint-policy", {
+            createHTML: (string) => string,
+          });
+          hintMarker.element.innerHTML = escapeHTMLPolicy.createHTML(
+            hintMarker.hintString.toUpperCase(),
+          );
+        } catch (policyError) {
+          _jsConsoleWarn("Could not create trusted types policy:", policyError);
+          // Skip updating the hint marker if policy creation fails
+        }
       } else {
-        console.error("trustedTypes is not supported in this environment.");
+        _jsConsoleError("trustedTypes is not supported in this environment.");
       }
     }
   }
@@ -1950,13 +2080,23 @@ function removeBoundingBoxes() {
   }
 }
 
-async function scrollToTop(
+function safeWindowScroll(x, y) {
+  if (typeof window.scroll === "function") {
+    window.scroll({ left: x, top: y, behavior: "instant" });
+  } else if (typeof window.scrollTo === "function") {
+    window.scrollTo({ left: x, top: y, behavior: "instant" });
+  } else {
+    _jsConsoleError("window.scroll and window.scrollTo are both not supported");
+  }
+}
+
+async function safeScrollToTop(
   draw_boxes,
   frame = "main.frame",
   frame_index = undefined,
 ) {
   removeBoundingBoxes();
-  window.scroll({ left: 0, top: 0, behavior: "instant" });
+  safeWindowScroll(0, 0);
   if (draw_boxes) {
     await buildElementsAndDrawBoundingBoxes(frame, frame_index);
   }
@@ -1968,20 +2108,21 @@ function getScrollXY() {
 }
 
 function scrollToXY(x, y) {
-  window.scroll({ left: x, top: y, behavior: "instant" });
+  safeWindowScroll(x, y);
 }
 
 async function scrollToNextPage(
   draw_boxes,
   frame = "main.frame",
   frame_index = undefined,
+  need_overlap = true,
 ) {
   // remove bounding boxes, scroll to next page with 200px overlap, then draw bounding boxes again
   // return true if there is a next page, false otherwise
   removeBoundingBoxes();
   window.scrollBy({
     left: 0,
-    top: window.innerHeight - 200,
+    top: need_overlap ? window.innerHeight - 200 : window.innerHeight,
     behavior: "instant",
   });
   if (draw_boxes) {
@@ -1991,11 +2132,15 @@ async function scrollToNextPage(
 }
 
 function isWindowScrollable() {
+  const documentBody = document.body;
+  const documentElement = document.documentElement;
+  if (!documentBody || !documentElement) {
+    return false;
+  }
+
   // Check if the body's overflow style is set to hidden
-  const bodyOverflow = getElementComputedStyle(document.body)?.overflow;
-  const htmlOverflow = getElementComputedStyle(
-    document.documentElement,
-  )?.overflow;
+  const bodyOverflow = getElementComputedStyle(documentBody)?.overflow;
+  const htmlOverflow = getElementComputedStyle(documentElement)?.overflow;
 
   // Check if the document height is greater than the window height
   const isScrollable =
@@ -2043,74 +2188,116 @@ function scrollToElementTop(element) {
  * https://stackoverflow.com/questions/7013559/is-there-a-way-to-get-element-hover-style-while-the-element-not-in-hover-state
  * https://stackoverflow.com/questions/17226676/how-to-simulate-a-mouseover-in-pure-javascript-that-activates-the-css-hover
  */
-function getHoverStylesMap() {
+async function getHoverStylesMap() {
   const hoverMap = new Map();
-  const sheets = document.styleSheets;
+  const sheets = [...document.styleSheets];
+
+  const parseCssSheet = (sheet) => {
+    const rules = sheet.cssRules || sheet.rules;
+    for (const rule of rules) {
+      if (rule.type === 1 && rule.selectorText) {
+        // Split multiple selectors (e.g., "a:hover, button:hover")
+        const selectors = rule.selectorText.split(",").map((s) => s.trim());
+
+        for (const selector of selectors) {
+          // Check if this is a hover rule
+          if (selector.includes(":hover")) {
+            // Get all parts of the selector
+            const parts = selector.split(/\s*[>+~]\s*/);
+
+            // Get the main hoverable element (the one with :hover)
+            const hoverPart = parts.find((part) => part.includes(":hover"));
+            if (!hoverPart) continue;
+
+            // Get base selector without :hover
+            const baseSelector = hoverPart.replace(/:hover/g, "").trim();
+
+            // Skip invalid selectors
+            if (!isValidCSSSelector(baseSelector)) {
+              continue;
+            }
+
+            // Get or create styles object for this selector
+            let styles = hoverMap.get(baseSelector) || {};
+
+            // Add all style properties
+            for (const prop of rule.style) {
+              styles[prop] = rule.style[prop];
+            }
+
+            // If this is a nested selector (like :hover > .something)
+            // store it in a special format
+            if (parts.length > 1) {
+              const fullSelector = selector;
+              styles["__nested__"] = styles["__nested__"] || [];
+              styles["__nested__"].push({
+                selector: fullSelector,
+                styles: Object.fromEntries(
+                  [...rule.style].map((prop) => [prop, rule.style[prop]]),
+                ),
+              });
+            }
+
+            // only need the style which includes the cursor attribute.
+            if (!("cursor" in styles)) {
+              continue;
+            }
+            hoverMap.set(baseSelector, styles);
+          }
+        }
+      }
+    }
+  };
 
   try {
-    for (const sheet of sheets) {
-      try {
-        const rules = sheet.cssRules || sheet.rules;
-        for (const rule of rules) {
-          if (rule.type === 1 && rule.selectorText) {
-            // Split multiple selectors (e.g., "a:hover, button:hover")
-            const selectors = rule.selectorText.split(",").map((s) => s.trim());
+    await Promise.all(
+      sheets.map(async (sheet) => {
+        try {
+          parseCssSheet(sheet);
+        } catch (e) {
+          _jsConsoleWarn("Could not access stylesheet:", e);
 
-            for (const selector of selectors) {
-              // Check if this is a hover rule
-              if (selector.includes(":hover")) {
-                // Get all parts of the selector
-                const parts = selector.split(/\s*[>+~]\s*/);
+          if ((e.name !== "SecurityError" && e.code !== 18) || !sheet.href) {
+            return;
+          }
 
-                // Get the main hoverable element (the one with :hover)
-                const hoverPart = parts.find((part) => part.includes(":hover"));
-                if (!hoverPart) continue;
+          let newLink = null;
+          try {
+            _jsConsoleLog("recreating the link element: ", sheet.href);
+            const oldLink = document.querySelector(
+              `link[href="${sheet.href}"]`,
+            );
+            newLink = document.createElement("link");
+            newLink.rel = "stylesheet";
+            newLink.href = oldLink.href + "?v=" + Date.now(); // to void cache
+            newLink.crossOrigin = "anonymous";
+            // until the new link loaded, removing the old one
+            document.head.append(newLink);
 
-                // Get base selector without :hover
-                const baseSelector = hoverPart.replace(/:hover/g, "").trim();
-
-                // Skip invalid selectors
-                if (!isValidCSSSelector(baseSelector)) {
-                  continue;
-                }
-
-                // Get or create styles object for this selector
-                let styles = hoverMap.get(baseSelector) || {};
-
-                // Add all style properties
-                for (const prop of rule.style) {
-                  styles[prop] = rule.style[prop];
-                }
-
-                // If this is a nested selector (like :hover > .something)
-                // store it in a special format
-                if (parts.length > 1) {
-                  const fullSelector = selector;
-                  styles["__nested__"] = styles["__nested__"] || [];
-                  styles["__nested__"].push({
-                    selector: fullSelector,
-                    styles: Object.fromEntries(
-                      [...rule.style].map((prop) => [prop, rule.style[prop]]),
-                    ),
-                  });
-                }
-
-                // only need the style which includes the cursor attribute.
-                if (!("cursor" in styles)) {
-                  continue;
-                }
-                hoverMap.set(baseSelector, styles);
-              }
+            // wait for a while until the sheet is fully loaded
+            await asyncSleepFor(1500);
+            const newSheets = [...document.styleSheets];
+            const refreshedSheet = newSheets.find(
+              (s) => s.href === newLink.href,
+            );
+            if (!refreshedSheet) {
+              newLink.remove();
+              return;
+            }
+            _jsConsoleLog("parsing recreated the link element: ", newLink.href);
+            parseCssSheet(refreshedSheet);
+            oldLink.remove();
+          } catch (e) {
+            _jsConsoleWarn("Error recreating the link element:", e);
+            if (newLink) {
+              newLink.remove();
             }
           }
         }
-      } catch (e) {
-        console.warn("Could not access stylesheet:", e);
-        continue;
-      }
-    }
+      }),
+    );
   } catch (e) {
-    console.error("Error processing stylesheets:", e);
+    _jsConsoleError("Error processing stylesheets:", e);
   }
 
   return hoverMap;
@@ -2121,7 +2308,7 @@ function findNodeById(arr, targetId, path = []) {
   for (let i = 0; i < arr.length; i++) {
     const currentPath = [...path, arr[i].id];
     if (arr[i].id === targetId) {
-      console.log("Lineage:", currentPath.join(" -> "));
+      _jsConsoleLog("Lineage:", currentPath.join(" -> "));
       return arr[i];
     }
     if (arr[i].children && arr[i].children.length > 0) {
@@ -2153,8 +2340,19 @@ if (window.globalDomDepthMap === undefined) {
 }
 
 function isClassNameIncludesHidden(className) {
-  // some hidden elements are with the classname like `class="select-items select-hide"`
-  return className.toLowerCase().includes("hide");
+  // some hidden elements are with the classname like `class="select-items select-hide"` or `class="dropdown-container dropdown-invisible"`
+  return (
+    className.toLowerCase().includes("hide") ||
+    className.toLowerCase().includes("invisible")
+  );
+}
+
+function isClassNameIncludesActivatedStatus(className) {
+  // some elements are with the classname like `class="open"` or `class="active"` should be considered as activated by the click
+  return (
+    className.toLowerCase().includes("open") ||
+    className.toLowerCase().includes("active")
+  );
 }
 
 function waitForNextFrame() {
@@ -2163,11 +2361,21 @@ function waitForNextFrame() {
   });
 }
 
-function sleep(ms) {
+function asyncSleepFor(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function addIncrementalNodeToMap(parentNode, childrenNode) {
+  const maxParsedElement = 3000;
+  const maxElementToWait = 100;
+  if ((await window.globalParsedElementCounter.get()) > maxParsedElement) {
+    _jsConsoleWarn(
+      "Too many elements parsed, stopping the observer to parse the elements",
+    );
+    await window.globalParsedElementCounter.add();
+    return;
+  }
+
   // make the dom parser async
   await waitForNextFrame();
   if (window.globalListnerFlag) {
@@ -2180,14 +2388,26 @@ async function addIncrementalNodeToMap(parentNode, childrenNode) {
 
     try {
       for (const child of childrenNode) {
+        // sleep for a while until animation ends
+        if (
+          (await window.globalParsedElementCounter.get()) < maxElementToWait
+        ) {
+          await asyncSleepFor(300);
+        }
         // Pass -1 as frame_index to indicate the frame number is not sensitive in this case
-        const [_, newNodeTree] = await buildElementTree(child, "", true);
+        const [_, newNodeTree] = await buildElementTree(
+          child,
+          "",
+          true,
+          false,
+          window.globalHoverStylesMap,
+        );
         if (newNodeTree.length > 0) {
           newNodesTreeList.push(...newNodeTree);
         }
       }
     } catch (error) {
-      console.error("Error building incremental element node:", error);
+      _jsConsoleError("Error building incremental element node:", error);
     }
     window.globalDomDepthMap.set(depth, newNodesTreeList);
   }
@@ -2201,95 +2421,125 @@ if (window.globalObserverForDOMIncrement === undefined) {
   ) {
     // TODO: how to detect duplicated recreate element?
     for (const mutation of mutationsList) {
-      if (mutation.type === "attributes") {
-        if (mutation.attributeName === "hidden") {
-          const node = mutation.target;
-          if (!node.hidden) {
-            window.globalOneTimeIncrementElements.push({
-              targetNode: node,
-              newNodes: [node],
-            });
-            await addIncrementalNodeToMap(node, [node]);
-          }
-        }
-        if (mutation.attributeName === "style") {
-          // TODO: need to confirm that elemnent is hidden previously
-          const node = mutation.target;
-          if (node.nodeType === Node.TEXT_NODE) continue;
-          if (node.tagName.toLowerCase() === "body") continue;
-          const newStyle = getElementComputedStyle(node);
-          const newDisplay = newStyle?.display;
-          if (newDisplay !== "none") {
-            window.globalOneTimeIncrementElements.push({
-              targetNode: node,
-              newNodes: [node],
-            });
-            await addIncrementalNodeToMap(node, [node]);
-          }
-        }
-        if (mutation.attributeName === "class") {
-          const node = mutation.target;
-          if (node.nodeType === Node.TEXT_NODE) continue;
-          if (node.tagName.toLowerCase() === "body") continue;
-          if (!mutation.oldValue) continue;
-          if (
-            !isClassNameIncludesHidden(mutation.oldValue) &&
-            !node.hasAttribute("data-menu-uid") // google framework use this to trace dropdown menu
-          )
-            continue;
-          const newStyle = getElementComputedStyle(node);
-          const newDisplay = newStyle?.display;
-          if (newDisplay !== "none") {
-            window.globalOneTimeIncrementElements.push({
-              targetNode: node,
-              newNodes: [node],
-            });
-            await addIncrementalNodeToMap(node, [node]);
-          }
-        }
+      const node = mutation.target;
+      if (node.nodeType === Node.TEXT_NODE) continue;
+      const tagName = node.tagName?.toLowerCase();
+
+      // ignore unique_id change to avoid infinite loop about DOM changes
+      if (mutation.attributeName === "unique_id") continue;
+
+      // if the changing element is dropdown related elements, we should consider
+      // they're the new element as long as the element is still visible on the page
+      if (
+        isDropdownRelatedElement(node) &&
+        getElementComputedStyle(node)?.display !== "none"
+      ) {
+        window.globalOneTimeIncrementElements.push({
+          targetNode: node,
+          newNodes: [node],
+        });
+        await addIncrementalNodeToMap(node, [node]);
+        continue;
       }
 
-      if (mutation.type === "childList") {
-        if (mutation.target.nodeType === Node.TEXT_NODE) continue;
-        const node = mutation.target;
-        let changedNode = {
-          targetNode: node, // TODO: for future usage, when we want to parse new elements into a tree
-        };
-        let newNodes = [];
-        if (mutation.addedNodes && mutation.addedNodes.length > 0) {
-          for (const node of mutation.addedNodes) {
-            // skip the text nodes, they won't be interactable
-            if (node.nodeType === Node.TEXT_NODE) continue;
+      // if they're not the dropdown related elements
+      // we detect the element based on the following rules
+      switch (mutation.type) {
+        case "attributes": {
+          switch (mutation.attributeName) {
+            case "hidden": {
+              if (!node.hidden) {
+                window.globalOneTimeIncrementElements.push({
+                  targetNode: node,
+                  newNodes: [node],
+                });
+                await addIncrementalNodeToMap(node, [node]);
+              }
+              break;
+            }
+            case "style": {
+              // TODO: need to confirm that elemnent is hidden previously
+              if (tagName === "body") continue;
+              if (getElementComputedStyle(node)?.display !== "none") {
+                window.globalOneTimeIncrementElements.push({
+                  targetNode: node,
+                  newNodes: [node],
+                });
+                await addIncrementalNodeToMap(node, [node]);
+              }
+              break;
+            }
+            case "class": {
+              if (tagName === "body") continue;
+              if (!mutation.oldValue) continue;
+              const currentClassName = node.className
+                ? node.className.toString()
+                : "";
+              if (
+                !isClassNameIncludesHidden(mutation.oldValue) &&
+                !isClassNameIncludesActivatedStatus(currentClassName) &&
+                !node.hasAttribute("data-menu-uid") && // google framework use this to trace dropdown menu
+                !mutation.oldValue.includes("select__items") &&
+                !(
+                  node.hasAttribute("data-testid") &&
+                  node.getAttribute("data-testid").includes("select-dropdown")
+                )
+              )
+                continue;
+              if (getElementComputedStyle(node)?.display !== "none") {
+                window.globalOneTimeIncrementElements.push({
+                  targetNode: node,
+                  newNodes: [node],
+                });
+                await addIncrementalNodeToMap(node, [node]);
+              }
+              break;
+            }
+          }
+          break;
+        }
+        case "childList": {
+          let changedNode = {
+            targetNode: node, // TODO: for future usage, when we want to parse new elements into a tree
+          };
+          let newNodes = [];
+          if (mutation.addedNodes && mutation.addedNodes.length > 0) {
+            for (const node of mutation.addedNodes) {
+              // skip the text nodes, they won't be interactable
+              if (node.nodeType === Node.TEXT_NODE) continue;
+              newNodes.push(node);
+            }
+          }
+          if (
+            newNodes.length == 0 &&
+            (tagName === "ul" ||
+              (tagName === "div" &&
+                node.hasAttribute("role") &&
+                node.getAttribute("role").toLowerCase() === "listbox"))
+          ) {
             newNodes.push(node);
           }
-        }
-        if (
-          newNodes.length == 0 &&
-          (node.tagName.toLowerCase() === "ul" ||
-            (node.tagName.toLowerCase() === "div" &&
-              node.hasAttribute("role") &&
-              node.getAttribute("role").toLowerCase() === "listbox"))
-        ) {
-          newNodes.push(node);
-        }
 
-        if (newNodes.length > 0) {
-          changedNode.newNodes = newNodes;
-          window.globalOneTimeIncrementElements.push(changedNode);
-          await addIncrementalNodeToMap(
-            changedNode.targetNode,
-            changedNode.newNodes,
-          );
+          if (newNodes.length > 0) {
+            changedNode.newNodes = newNodes;
+            window.globalOneTimeIncrementElements.push(changedNode);
+            await addIncrementalNodeToMap(
+              changedNode.targetNode,
+              changedNode.newNodes,
+            );
+          }
+          break;
         }
       }
     }
   });
 }
 
-function startGlobalIncrementalObserver() {
+async function startGlobalIncrementalObserver(element = null) {
   window.globalListnerFlag = true;
   window.globalDomDepthMap = new Map();
   window.globalOneTimeIncrementElements = [];
+  window.globalHoverStylesMap = await getHoverStylesMap();
   window.globalParsedElementCounter = new SafeCounter();
   window.globalObserverForDOMIncrement.takeRecords(); // cleanup the older data
   window.globalObserverForDOMIncrement.observe(document.body, {
@@ -2299,6 +2549,17 @@ function startGlobalIncrementalObserver() {
     subtree: true,
     characterData: true,
   });
+
+  // if the element is in shadow DOM, we need to observe the shadow DOM as well
+  if (element && element.getRootNode() instanceof ShadowRoot) {
+    window.globalObserverForDOMIncrement.observe(element.getRootNode(), {
+      attributes: true,
+      attributeOldValue: true,
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+  }
 }
 
 async function stopGlobalIncrementalObserver() {
@@ -2309,18 +2570,20 @@ async function stopGlobalIncrementalObserver() {
     (await window.globalParsedElementCounter.get()) <
     window.globalOneTimeIncrementElements.length
   ) {
-    await sleep(100);
+    await asyncSleepFor(100);
   }
   window.globalOneTimeIncrementElements = [];
   window.globalDomDepthMap = new Map();
 }
 
-async function getIncrementElements() {
-  while (
-    (await window.globalParsedElementCounter.get()) <
-    window.globalOneTimeIncrementElements.length
-  ) {
-    await sleep(100);
+async function getIncrementElements(wait_until_finished = true) {
+  if (wait_until_finished) {
+    while (
+      (await window.globalParsedElementCounter.get()) <
+      window.globalOneTimeIncrementElements.length
+    ) {
+      await asyncSleepFor(100);
+    }
   }
 
   // cleanup the chidren tree, remove the duplicated element
@@ -2340,6 +2603,10 @@ async function getIncrementElements() {
       let children = element.children;
       for (let i = 0; i < children.length; i++) {
         const child = children[i];
+        // FIXME: skip to update the element if it is in shadow DOM, since document.querySelector will not work
+        if (child.shadowHost) {
+          continue;
+        }
         const domElement = document.querySelector(`[unique_id="${child.id}"]`);
         // if the element is still on the page, we rebuild the element to update the information
         if (domElement) {
@@ -2351,6 +2618,8 @@ async function getIncrementElements() {
           );
           newChild.children = child.children;
           children[i] = newChild;
+        } else {
+          children[i].interactable = false;
         }
       }
 
@@ -2371,19 +2640,24 @@ async function getIncrementElements() {
     };
 
     for (let treeHeadElement of treeList) {
-      const domElement = document.querySelector(
-        `[unique_id="${treeHeadElement.id}"]`,
-      );
-      // if the element is still on the page, we rebuild the element to update the information
-      if (domElement) {
-        let newHead = await buildElementObject(
-          "",
-          domElement,
-          treeHeadElement.interactable,
-          treeHeadElement.purgeable,
+      // FIXME: skip to update the element if it is in shadow DOM, since document.querySelector will not work
+      if (!treeHeadElement.shadowHost) {
+        const domElement = document.querySelector(
+          `[unique_id="${treeHeadElement.id}"]`,
         );
-        newHead.children = treeHeadElement.children;
-        treeHeadElement = newHead;
+        // if the element is still on the page, we rebuild the element to update the information
+        if (domElement) {
+          let newHead = await buildElementObject(
+            "",
+            domElement,
+            treeHeadElement.interactable,
+            treeHeadElement.purgeable,
+          );
+          newHead.children = treeHeadElement.children;
+          treeHeadElement = newHead;
+        } else {
+          treeHeadElement.interactable = false;
+        }
       }
 
       // check if the element is existed
@@ -2409,11 +2683,11 @@ removeBoundingBoxes();
 
 // Get the element tree
 const [elements, tree] = buildTreeFromBody();
-console.log(elements); // All elements
-console.log(tree);     // Tree structure
+_jsConsoleLog(elements); // All elements
+_jsConsoleLog(tree);     // Tree structure
 
 // Test if a specific element is interactable
 const element = document.querySelector('button');
 const hoverMap = getHoverStylesMap();
-console.log(isInteractable(element, hoverMap));
+_jsConsoleLog(isInteractable(element, hoverMap));
  */

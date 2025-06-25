@@ -5,7 +5,6 @@ from skyvern.forge.sdk.api.llm.exceptions import (
     DuplicateLLMConfigError,
     InvalidLLMConfigError,
     MissingLLMProviderEnvVarsError,
-    NoProviderEnabledError,
 )
 from skyvern.forge.sdk.api.llm.models import LiteLLMParams, LLMConfig, LLMRouterConfig
 
@@ -38,24 +37,22 @@ class LLMConfigRegistry:
     @classmethod
     def get_config(cls, llm_key: str) -> LLMRouterConfig | LLMConfig:
         if llm_key not in cls._configs:
-            raise InvalidLLMConfigError(llm_key)
+            # If the key is not found in registered configs, treat it as a general model
+            if not llm_key:
+                raise InvalidLLMConfigError(f"LLM_KEY not set for {llm_key}")
+            return LLMConfig(
+                llm_key,  # Use the LLM_KEY as the model name
+                ["LLM_API_KEY"],
+                supports_vision=settings.LLM_CONFIG_SUPPORT_VISION,
+                add_assistant_prefix=settings.LLM_CONFIG_ADD_ASSISTANT_PREFIX,
+                max_completion_tokens=settings.LLM_CONFIG_MAX_TOKENS,
+            )
 
         return cls._configs[llm_key]
 
-
-# if none of the LLM providers are enabled, raise an error
-if not any(
-    [
-        settings.ENABLE_OPENAI,
-        settings.ENABLE_ANTHROPIC,
-        settings.ENABLE_AZURE,
-        settings.ENABLE_AZURE_GPT4O_MINI,
-        settings.ENABLE_BEDROCK,
-        settings.ENABLE_GEMINI,
-        settings.ENABLE_NOVITA,
-    ]
-):
-    raise NoProviderEnabledError()
+    @classmethod
+    def get_model_names(cls) -> list[str]:
+        return list(cls._configs.keys())
 
 
 if settings.ENABLE_OPENAI:
@@ -66,6 +63,36 @@ if settings.ENABLE_OPENAI:
             ["OPENAI_API_KEY"],
             supports_vision=False,
             add_assistant_prefix=False,
+        ),
+    )
+    LLMConfigRegistry.register_config(
+        "OPENAI_GPT4_1",
+        LLMConfig(
+            "gpt-4.1",
+            ["OPENAI_API_KEY"],
+            supports_vision=True,
+            add_assistant_prefix=False,
+            max_completion_tokens=32768,
+        ),
+    )
+    LLMConfigRegistry.register_config(
+        "OPENAI_GPT4_1_MINI",
+        LLMConfig(
+            "gpt-4.1-mini",
+            ["OPENAI_API_KEY"],
+            supports_vision=True,
+            add_assistant_prefix=False,
+            max_completion_tokens=32768,
+        ),
+    )
+    LLMConfigRegistry.register_config(
+        "OPENAI_GPT4_1_NANO",
+        LLMConfig(
+            "gpt-4.1-nano",
+            ["OPENAI_API_KEY"],
+            supports_vision=True,
+            add_assistant_prefix=False,
+            max_completion_tokens=32768,
         ),
     )
     LLMConfigRegistry.register_config(
@@ -122,6 +149,36 @@ if settings.ENABLE_OPENAI:
             supports_vision=True,
             add_assistant_prefix=False,
             max_completion_tokens=16384,
+        ),
+    )
+    LLMConfigRegistry.register_config(
+        "OPENAI_O4_MINI",
+        LLMConfig(
+            "o4-mini",
+            ["OPENAI_API_KEY"],
+            supports_vision=True,
+            add_assistant_prefix=False,
+            max_completion_tokens=100000,
+            temperature=None,  # Temperature isn't supported in the O-model series
+            reasoning_effort="high",
+            litellm_params=LiteLLMParams(
+                drop_params=True,  # type: ignore
+            ),
+        ),
+    )
+    LLMConfigRegistry.register_config(
+        "OPENAI_O3",
+        LLMConfig(
+            "o3",
+            ["OPENAI_API_KEY"],
+            supports_vision=True,
+            add_assistant_prefix=False,
+            max_completion_tokens=100000,
+            temperature=None,  # Temperature isn't supported in the O-model series
+            reasoning_effort="high",
+            litellm_params=LiteLLMParams(
+                drop_params=True,  # type: ignore
+            ),
         ),
     )
 
@@ -183,6 +240,36 @@ if settings.ENABLE_ANTHROPIC:
             max_completion_tokens=8192,
         ),
     )
+    LLMConfigRegistry.register_config(
+        "ANTHROPIC_CLAUDE3.5_HAIKU",
+        LLMConfig(
+            "anthropic/claude-3-5-haiku-latest",
+            ["ANTHROPIC_API_KEY"],
+            supports_vision=True,
+            add_assistant_prefix=True,
+            max_completion_tokens=8192,
+        ),
+    )
+    LLMConfigRegistry.register_config(
+        "ANTHROPIC_CLAUDE4_OPUS",
+        LLMConfig(
+            "anthropic/claude-opus-4-20250514",
+            ["ANTHROPIC_API_KEY"],
+            supports_vision=True,
+            add_assistant_prefix=True,
+            max_completion_tokens=8192,
+        ),
+    )
+    LLMConfigRegistry.register_config(
+        "ANTHROPIC_CLAUDE4_SONNET",
+        LLMConfig(
+            "anthropic/claude-sonnet-4-20250514",
+            ["ANTHROPIC_API_KEY"],
+            supports_vision=True,
+            add_assistant_prefix=True,
+            max_completion_tokens=8192,
+        ),
+    )
 
 if settings.ENABLE_BEDROCK:
     # Supported through AWS IAM authentication
@@ -214,12 +301,23 @@ if settings.ENABLE_BEDROCK:
         ),
     )
     LLMConfigRegistry.register_config(
+        "BEDROCK_ANTHROPIC_CLAUDE3.5_HAIKU",
+        LLMConfig(
+            "bedrock/anthropic.claude-3-5-haiku-20241022-v1:0",
+            ["AWS_REGION"],
+            supports_vision=True,
+            add_assistant_prefix=True,
+            max_completion_tokens=8192,
+        ),
+    )
+    LLMConfigRegistry.register_config(
         "BEDROCK_ANTHROPIC_CLAUDE3.5_SONNET",
         LLMConfig(
             "bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0",
             ["AWS_REGION"],
             supports_vision=True,
             add_assistant_prefix=True,
+            max_completion_tokens=8192,
         ),
     )
     LLMConfigRegistry.register_config(
@@ -229,6 +327,7 @@ if settings.ENABLE_BEDROCK:
             ["AWS_REGION"],
             supports_vision=True,
             add_assistant_prefix=True,
+            max_completion_tokens=8192,
         ),
     )
     LLMConfigRegistry.register_config(
@@ -256,6 +355,36 @@ if settings.ENABLE_BEDROCK:
             ["AWS_REGION"],
             supports_vision=True,
             add_assistant_prefix=True,
+        ),
+    )
+    LLMConfigRegistry.register_config(
+        "BEDROCK_ANTHROPIC_CLAUDE3.7_SONNET_INFERENCE_PROFILE",
+        LLMConfig(
+            "bedrock/us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+            ["AWS_REGION"],
+            supports_vision=True,
+            add_assistant_prefix=True,
+            max_completion_tokens=64000,
+        ),
+    )
+    LLMConfigRegistry.register_config(
+        "BEDROCK_ANTHROPIC_CLAUDE4_SONNET_INFERENCE_PROFILE",
+        LLMConfig(
+            "bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0",
+            ["AWS_REGION"],
+            supports_vision=True,
+            add_assistant_prefix=True,
+            max_completion_tokens=64000,
+        ),
+    )
+    LLMConfigRegistry.register_config(
+        "BEDROCK_ANTHROPIC_CLAUDE4_OPUS_INFERENCE_PROFILE",
+        LLMConfig(
+            "bedrock/us.anthropic.claude-opus-4-20250514-v1:0",
+            ["AWS_REGION"],
+            supports_vision=True,
+            add_assistant_prefix=True,
+            max_completion_tokens=32000,
         ),
     )
 
@@ -319,7 +448,166 @@ if settings.ENABLE_AZURE_O3_MINI:
             add_assistant_prefix=False,
             max_completion_tokens=16384,
             temperature=None,  # Temperature isn't supported in the O-model series
-            reasoning_effort="low",
+            reasoning_effort="high",
+        ),
+    )
+
+if settings.ENABLE_AZURE_GPT4_1:
+    LLMConfigRegistry.register_config(
+        "AZURE_OPENAI_GPT4_1",
+        LLMConfig(
+            f"azure/{settings.AZURE_GPT4_1_DEPLOYMENT}",
+            [
+                "AZURE_GPT4_1_DEPLOYMENT",
+                "AZURE_GPT4_1_API_KEY",
+                "AZURE_GPT4_1_API_BASE",
+                "AZURE_GPT4_1_API_VERSION",
+            ],
+            litellm_params=LiteLLMParams(
+                api_base=settings.AZURE_GPT4_1_API_BASE,
+                api_key=settings.AZURE_GPT4_1_API_KEY,
+                api_version=settings.AZURE_GPT4_1_API_VERSION,
+                model_info={"model_name": "azure/gpt-4.1"},
+            ),
+            supports_vision=True,
+            add_assistant_prefix=False,
+            max_completion_tokens=32768,
+        ),
+    )
+
+if settings.ENABLE_AZURE_GPT4_1_MINI:
+    LLMConfigRegistry.register_config(
+        "AZURE_OPENAI_GPT4_1_MINI",
+        LLMConfig(
+            f"azure/{settings.AZURE_GPT4_1_MINI_DEPLOYMENT}",
+            [
+                "AZURE_GPT4_1_MINI_DEPLOYMENT",
+                "AZURE_GPT4_1_MINI_API_KEY",
+                "AZURE_GPT4_1_MINI_API_BASE",
+                "AZURE_GPT4_1_MINI_API_VERSION",
+            ],
+            litellm_params=LiteLLMParams(
+                api_base=settings.AZURE_GPT4_1_MINI_API_BASE,
+                api_key=settings.AZURE_GPT4_1_MINI_API_KEY,
+                api_version=settings.AZURE_GPT4_1_MINI_API_VERSION,
+                model_info={"model_name": "azure/gpt-4.1-mini"},
+            ),
+            supports_vision=True,
+            add_assistant_prefix=False,
+            max_completion_tokens=32768,
+        ),
+    )
+
+if settings.ENABLE_AZURE_GPT4_1_NANO:
+    LLMConfigRegistry.register_config(
+        "AZURE_OPENAI_GPT4_1_NANO",
+        LLMConfig(
+            f"azure/{settings.AZURE_GPT4_1_NANO_DEPLOYMENT}",
+            [
+                "AZURE_GPT4_1_NANO_DEPLOYMENT",
+                "AZURE_GPT4_1_NANO_API_KEY",
+                "AZURE_GPT4_1_NANO_API_BASE",
+                "AZURE_GPT4_1_NANO_API_VERSION",
+            ],
+            litellm_params=LiteLLMParams(
+                api_base=settings.AZURE_GPT4_1_NANO_API_BASE,
+                api_key=settings.AZURE_GPT4_1_NANO_API_KEY,
+                api_version=settings.AZURE_GPT4_1_NANO_API_VERSION,
+                model_info={"model_name": "azure/gpt-4.1-nano"},
+            ),
+            supports_vision=True,
+            add_assistant_prefix=False,
+            max_completion_tokens=32768,
+        ),
+    )
+
+
+if settings.ENABLE_AZURE_O4_MINI:
+    LLMConfigRegistry.register_config(
+        "AZURE_OPENAI_O4_MINI",
+        LLMConfig(
+            f"azure/{settings.AZURE_O4_MINI_DEPLOYMENT}",
+            [
+                "AZURE_O4_MINI_DEPLOYMENT",
+                "AZURE_O4_MINI_API_KEY",
+                "AZURE_O4_MINI_API_BASE",
+                "AZURE_O4_MINI_API_VERSION",
+            ],
+            litellm_params=LiteLLMParams(
+                api_base=settings.AZURE_O4_MINI_API_BASE,
+                api_key=settings.AZURE_O4_MINI_API_KEY,
+                api_version=settings.AZURE_O4_MINI_API_VERSION,
+                model_info={"model_name": "azure/o4-mini"},
+            ),
+            supports_vision=True,
+            add_assistant_prefix=False,
+            max_completion_tokens=100000,
+        ),
+    )
+
+
+if settings.ENABLE_AZURE_O3:
+    LLMConfigRegistry.register_config(
+        "AZURE_OPENAI_O3",
+        LLMConfig(
+            f"azure/{settings.AZURE_O3_DEPLOYMENT}",
+            [
+                "AZURE_O3_DEPLOYMENT",
+                "AZURE_O3_API_KEY",
+                "AZURE_O3_API_BASE",
+                "AZURE_O3_API_VERSION",
+            ],
+            litellm_params=LiteLLMParams(
+                api_base=settings.AZURE_O3_API_BASE,
+                api_key=settings.AZURE_O3_API_KEY,
+                api_version=settings.AZURE_O3_API_VERSION,
+                model_info={"model_name": "azure/o3"},
+            ),
+            supports_vision=True,
+            add_assistant_prefix=False,
+            max_completion_tokens=100000,
+        ),
+    )
+if settings.ENABLE_VOLCENGINE:
+    LLMConfigRegistry.register_config(
+        "VOLCENGINE_DOUBAO_SEED_1_6",
+        LLMConfig(
+            "volcengine/doubao-seed-1.6-250615",
+            ["VOLCENGINE_API_KEY"],
+            litellm_params=LiteLLMParams(
+                api_base=settings.VOLCENGINE_API_BASE,
+                api_key=settings.VOLCENGINE_API_KEY,
+            ),
+            supports_vision=True,
+            add_assistant_prefix=False,
+        ),
+    )
+
+    LLMConfigRegistry.register_config(
+        "VOLCENGINE_DOUBAO_SEED_1_6_FLASH",
+        LLMConfig(
+            "volcengine/doubao-seed-1.6-flash-250615",
+            ["VOLCENGINE_API_KEY"],
+            litellm_params=LiteLLMParams(
+                api_base=settings.VOLCENGINE_API_BASE,
+                api_key=settings.VOLCENGINE_API_KEY,
+            ),
+            supports_vision=True,
+            add_assistant_prefix=False,
+        ),
+    )
+
+    LLMConfigRegistry.register_config(
+        "VOLCENGINE_DOUBAO_1_5_THINKING_VISION_PRO",
+        LLMConfig(
+            "volcengine/doubao-1-5-thinking-vision-pro-250428",
+            ["VOLCENGINE_API_KEY"],
+            litellm_params=LiteLLMParams(
+                api_base=settings.VOLCENGINE_API_BASE,
+                api_key=settings.VOLCENGINE_API_KEY,
+            ),
+            supports_vision=True,
+            add_assistant_prefix=False,
         ),
     )
 
@@ -364,6 +652,37 @@ if settings.ENABLE_GEMINI:
             max_completion_tokens=8192,
         ),
     )
+    LLMConfigRegistry.register_config(
+        "GEMINI_2.5_PRO_PREVIEW",
+        LLMConfig(
+            "gemini/gemini-2.5-pro-preview-05-06",
+            ["GEMINI_API_KEY"],
+            supports_vision=True,
+            add_assistant_prefix=False,
+            max_completion_tokens=65536,
+        ),
+    )
+    LLMConfigRegistry.register_config(
+        "GEMINI_2.5_PRO_EXP_03_25",
+        LLMConfig(
+            "gemini/gemini-2.5-pro-exp-03-25",
+            ["GEMINI_API_KEY"],
+            supports_vision=True,
+            add_assistant_prefix=False,
+            max_completion_tokens=65536,
+        ),
+    )
+    LLMConfigRegistry.register_config(
+        "GEMINI_2.5_FLASH_PREVIEW",
+        LLMConfig(
+            "gemini/gemini-2.5-flash-preview-05-20",
+            ["GEMINI_API_KEY"],
+            supports_vision=True,
+            add_assistant_prefix=False,
+            max_completion_tokens=65536,
+        ),
+    )
+
 
 if settings.ENABLE_NOVITA:
     LLMConfigRegistry.register_config(
@@ -531,3 +850,229 @@ if settings.ENABLE_NOVITA:
             ),
         ),
     )
+
+# Create a GCP service account WITH the Vertex AI API access enabled
+# Get the credentials json file. See documentation: https://support.google.com/a/answer/7378726?hl=en
+# my_vertex_credentials = json.dumps(json.load(open("my_credentials_file.json")))
+# Set the value of my_vertex_credentials as the environment variable VERTEX_CREDENTIALS
+# NOTE: If you want to specify a location, make sure the model is availale in the target location.
+# See documentation: https://cloud.google.com/vertex-ai/generative-ai/docs/learn/locations#united-states
+if settings.ENABLE_VERTEX_AI and settings.VERTEX_CREDENTIALS:
+    if not settings.VERTEX_PROJECT_ID:
+        import json
+
+        credentials = json.loads(settings.VERTEX_CREDENTIALS)
+        settings.VERTEX_PROJECT_ID = credentials.get("project_id")
+
+    api_base: str | None = None
+    if settings.VERTEX_LOCATION == "global":
+        api_base = f"https://aiplatform.googleapis.com/v1/projects/{settings.VERTEX_PROJECT_ID}/locations/global/publishers/google/models"
+
+    LLMConfigRegistry.register_config(
+        "VERTEX_GEMINI_2.5_PRO_PREVIEW",
+        LLMConfig(
+            "vertex_ai/gemini-2.5-pro-preview-05-06",
+            ["VERTEX_CREDENTIALS"],
+            supports_vision=True,
+            add_assistant_prefix=False,
+            max_completion_tokens=65535,
+            litellm_params=LiteLLMParams(
+                vertex_credentials=settings.VERTEX_CREDENTIALS,
+                api_base=f"{api_base}/gemini-2.5-pro-preview-05-06" if api_base else None,
+                vertex_location=settings.VERTEX_LOCATION,
+            ),
+        ),
+    )
+    LLMConfigRegistry.register_config(
+        "VERTEX_GEMINI_2.5_FLASH_PREVIEW",
+        LLMConfig(
+            "vertex_ai/gemini-2.5-flash-preview-05-20",
+            ["VERTEX_CREDENTIALS"],
+            supports_vision=True,
+            add_assistant_prefix=False,
+            max_completion_tokens=65535,
+            litellm_params=LiteLLMParams(
+                vertex_credentials=settings.VERTEX_CREDENTIALS,
+                api_base=f"{api_base}/gemini-2.5-flash-preview-05-20" if api_base else None,
+                vertex_location=settings.VERTEX_LOCATION,
+            ),
+        ),
+    )
+    LLMConfigRegistry.register_config(
+        "VERTEX_GEMINI_2.5_FLASH_PREVIEW_04_17",
+        LLMConfig(
+            "vertex_ai/gemini-2.5-flash-preview-04-17",
+            ["VERTEX_CREDENTIALS"],
+            supports_vision=True,
+            add_assistant_prefix=False,
+            max_completion_tokens=65535,
+            litellm_params=LiteLLMParams(
+                vertex_credentials=settings.VERTEX_CREDENTIALS,
+                api_base=f"{api_base}/gemini-2.5-flash-preview-04-17" if api_base else None,
+                vertex_location=settings.VERTEX_LOCATION,
+            ),
+        ),
+    )
+    LLMConfigRegistry.register_config(
+        "VERTEX_GEMINI_2.5_FLASH_PREVIEW_05_20",
+        LLMConfig(
+            "vertex_ai/gemini-2.5-flash-preview-05-20",
+            ["VERTEX_CREDENTIALS"],
+            supports_vision=True,
+            add_assistant_prefix=False,
+            max_completion_tokens=65535,
+            litellm_params=LiteLLMParams(
+                vertex_credentials=settings.VERTEX_CREDENTIALS,
+                api_base=f"{api_base}/gemini-2.5-flash-preview-05-20" if api_base else None,
+                vertex_location=settings.VERTEX_LOCATION,
+            ),
+        ),
+    )
+    LLMConfigRegistry.register_config(
+        "VERTEX_GEMINI_FLASH_2_0",
+        LLMConfig(
+            "vertex_ai/gemini-2.0-flash-001",
+            ["VERTEX_CREDENTIALS"],
+            supports_vision=True,
+            add_assistant_prefix=False,
+            max_completion_tokens=8192,
+            litellm_params=LiteLLMParams(
+                api_base=f"{api_base}/gemini-2.0-flash-001" if api_base else None,
+                vertex_credentials=settings.VERTEX_CREDENTIALS,
+                vertex_location=settings.VERTEX_LOCATION,
+            ),
+        ),
+    )
+    LLMConfigRegistry.register_config(
+        "VERTEX_GEMINI_PRO",
+        LLMConfig(
+            "vertex_ai/gemini-1.5-pro",
+            ["VERTEX_CREDENTIALS"],
+            supports_vision=True,
+            add_assistant_prefix=False,
+            max_completion_tokens=8192,
+            litellm_params=LiteLLMParams(
+                vertex_credentials=settings.VERTEX_CREDENTIALS,
+                vertex_location=settings.VERTEX_LOCATION,  # WARN: this model don't support global
+            ),
+        ),
+    )
+    LLMConfigRegistry.register_config(
+        "VERTEX_GEMINI_FLASH",
+        LLMConfig(
+            "vertex_ai/gemini-1.5-flash",
+            ["VERTEX_CREDENTIALS"],
+            supports_vision=True,
+            add_assistant_prefix=False,
+            max_completion_tokens=8192,
+            litellm_params=LiteLLMParams(
+                vertex_credentials=settings.VERTEX_CREDENTIALS,
+                vertex_location=settings.VERTEX_LOCATION,  # WARN: this model don't support global
+            ),
+        ),
+    )
+
+if settings.ENABLE_OLLAMA:
+    # Register Ollama model configured in settings
+    if settings.OLLAMA_MODEL:
+        ollama_model_name = settings.OLLAMA_MODEL
+        LLMConfigRegistry.register_config(
+            "OLLAMA",
+            LLMConfig(
+                f"ollama/{ollama_model_name}",
+                ["OLLAMA_SERVER_URL", "OLLAMA_MODEL"],
+                supports_vision=False,  # Ollama does not support vision yet
+                add_assistant_prefix=False,
+                litellm_params=LiteLLMParams(
+                    api_base=settings.OLLAMA_SERVER_URL,
+                    api_key=None,
+                    api_version=None,
+                    model_info={"model_name": f"ollama/{ollama_model_name}"},
+                ),
+            ),
+        )
+
+if settings.ENABLE_OPENROUTER:
+    # Register OpenRouter model configured in settings
+    if settings.OPENROUTER_MODEL:
+        openrouter_model_name = settings.OPENROUTER_MODEL
+        LLMConfigRegistry.register_config(
+            "OPENROUTER",
+            LLMConfig(
+                f"openrouter/{openrouter_model_name}",
+                ["OPENROUTER_API_KEY", "OPENROUTER_MODEL"],
+                supports_vision=settings.LLM_CONFIG_SUPPORT_VISION,
+                add_assistant_prefix=False,
+                max_completion_tokens=settings.LLM_CONFIG_MAX_TOKENS,
+                litellm_params=LiteLLMParams(
+                    api_key=settings.OPENROUTER_API_KEY,
+                    api_base=settings.OPENROUTER_API_BASE,
+                    api_version=None,
+                    model_info={"model_name": f"openrouter/{openrouter_model_name}"},
+                ),
+            ),
+        )
+if settings.ENABLE_GROQ:
+    # Register Groq model configured in settings
+    if settings.GROQ_MODEL:
+        groq_model_name = settings.GROQ_MODEL
+        LLMConfigRegistry.register_config(
+            "GROQ",
+            LLMConfig(
+                f"groq/{groq_model_name}",
+                ["GROQ_API_KEY", "GROQ_MODEL"],
+                supports_vision=settings.LLM_CONFIG_SUPPORT_VISION,
+                add_assistant_prefix=False,
+                max_completion_tokens=settings.LLM_CONFIG_MAX_TOKENS,
+                litellm_params=LiteLLMParams(
+                    api_key=settings.GROQ_API_KEY,
+                    api_version=None,
+                    api_base=settings.GROQ_API_BASE,
+                    model_info={"model_name": f"groq/{groq_model_name}"},
+                ),
+            ),
+        )
+# Add support for dynamically configuring OpenAI-compatible LLM models
+# Based on liteLLM's support for OpenAI-compatible APIs
+# See documentation: https://docs.litellm.ai/docs/providers/openai_compatible
+if settings.ENABLE_OPENAI_COMPATIBLE:
+    # Check for required model name
+    openai_compatible_model_key = settings.OPENAI_COMPATIBLE_MODEL_KEY
+    openai_compatible_model_name = settings.OPENAI_COMPATIBLE_MODEL_NAME
+
+    if not openai_compatible_model_name:
+        raise InvalidLLMConfigError(
+            "OPENAI_COMPATIBLE_MODEL_NAME is required but not set. OpenAI-compatible model will not be registered."
+        )
+    else:
+        # Required environment variables to check
+        required_env_vars = ["OPENAI_COMPATIBLE_API_KEY", "OPENAI_COMPATIBLE_MODEL_NAME", "OPENAI_COMPATIBLE_API_BASE"]
+
+        # Configure litellm parameters - note the "openai/" prefix required for liteLLM routing
+        litellm_params = LiteLLMParams(
+            api_key=settings.OPENAI_COMPATIBLE_API_KEY,
+            api_base=settings.OPENAI_COMPATIBLE_API_BASE,
+            api_version=settings.OPENAI_COMPATIBLE_API_VERSION,
+            model_info={"model_name": f"openai/{openai_compatible_model_name}"},
+        )
+
+        # Configure LLMConfig
+        LLMConfigRegistry.register_config(
+            openai_compatible_model_key,
+            LLMConfig(
+                f"openai/{openai_compatible_model_name}",  # Add openai/ prefix for liteLLM
+                required_env_vars,
+                supports_vision=settings.OPENAI_COMPATIBLE_SUPPORTS_VISION,
+                add_assistant_prefix=settings.OPENAI_COMPATIBLE_ADD_ASSISTANT_PREFIX,
+                max_completion_tokens=settings.OPENAI_COMPATIBLE_MAX_TOKENS or settings.LLM_CONFIG_MAX_TOKENS,
+                temperature=settings.OPENAI_COMPATIBLE_TEMPERATURE
+                if settings.OPENAI_COMPATIBLE_TEMPERATURE is not None
+                else settings.LLM_CONFIG_TEMPERATURE,
+                litellm_params=litellm_params,
+                reasoning_effort=settings.OPENAI_COMPATIBLE_REASONING_EFFORT,
+            ),
+        )
+        LOG.info(
+            f"Registered OpenAI-compatible model with key {openai_compatible_model_key}",
+            model_name=openai_compatible_model_name,
+        )

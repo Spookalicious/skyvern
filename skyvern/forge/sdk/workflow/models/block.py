@@ -20,7 +20,7 @@ from urllib.parse import quote
 import filetype
 import structlog
 from email_validator import EmailNotValidError, validate_email
-from jinja2 import Template
+from jinja2.sandbox import SandboxedEnvironment
 from playwright.async_api import Page
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
@@ -30,7 +30,6 @@ from skyvern.config import settings
 from skyvern.constants import GET_DOWNLOADED_FILES_TIMEOUT, MAX_UPLOAD_FILE_COUNT
 from skyvern.exceptions import (
     ContextParameterValueNotFound,
-    DisabledBlockExecutionError,
     MissingBrowserState,
     MissingBrowserStatePage,
     SkyvernException,
@@ -49,7 +48,7 @@ from skyvern.forge.sdk.api.files import (
 )
 from skyvern.forge.sdk.api.llm.api_handler_factory import LLMAPIHandlerFactory
 from skyvern.forge.sdk.artifact.models import ArtifactType
-from skyvern.forge.sdk.core.validators import prepend_scheme_and_validate_url
+from skyvern.forge.sdk.core import skyvern_context
 from skyvern.forge.sdk.db.enums import TaskType
 from skyvern.forge.sdk.schemas.files import FileInfo
 from skyvern.forge.sdk.schemas.task_v2 import TaskV2Status
@@ -64,6 +63,7 @@ from skyvern.forge.sdk.workflow.exceptions import (
     NoIterableValueFound,
     NoValidEmailRecipient,
 )
+from skyvern.forge.sdk.workflow.models.constants import FileStorageType
 from skyvern.forge.sdk.workflow.models.parameter import (
     PARAMETER_TYPE,
     AWSSecretParameter,
@@ -71,10 +71,13 @@ from skyvern.forge.sdk.workflow.models.parameter import (
     OutputParameter,
     WorkflowParameter,
 )
+from skyvern.schemas.runs import RunEngine
+from skyvern.utils.url_validators import prepend_scheme_and_validate_url
 from skyvern.webeye.browser_factory import BrowserState
 from skyvern.webeye.utils.page import SkyvernFrame
 
 LOG = structlog.get_logger()
+jinja_sandbox_env = SandboxedEnvironment()
 
 
 class BlockType(StrEnum):
@@ -85,6 +88,7 @@ class BlockType(StrEnum):
     TEXT_PROMPT = "text_prompt"
     DOWNLOAD_TO_S3 = "download_to_s3"
     UPLOAD_TO_S3 = "upload_to_s3"
+    FILE_UPLOAD = "file_upload"
     SEND_EMAIL = "send_email"
     FILE_URL_PARSER = "file_url_parser"
     VALIDATION = "validation"
@@ -107,6 +111,17 @@ class BlockStatus(StrEnum):
     timed_out = "timed_out"
 
 
+# Mapping from TaskV2Status to the corresponding BlockStatus. Declared once at
+# import time so it is not recreated on each block execution.
+TASKV2_TO_BLOCK_STATUS: dict[TaskV2Status, BlockStatus] = {
+    TaskV2Status.completed: BlockStatus.completed,
+    TaskV2Status.terminated: BlockStatus.terminated,
+    TaskV2Status.failed: BlockStatus.failed,
+    TaskV2Status.canceled: BlockStatus.canceled,
+    TaskV2Status.timed_out: BlockStatus.timed_out,
+}
+
+
 @dataclass(frozen=True)
 class BlockResult:
     success: bool
@@ -123,6 +138,7 @@ class Block(BaseModel, abc.ABC):
     block_type: BlockType
     output_parameter: OutputParameter
     continue_on_failure: bool = False
+    model: dict[str, Any] | None = None
 
     async def record_output_parameter_value(
         self,
@@ -180,14 +196,33 @@ class Block(BaseModel, abc.ABC):
     ) -> str:
         if not potential_template:
             return potential_template
-        template = Template(potential_template)
+        template = jinja_sandbox_env.from_string(potential_template)
 
+        block_reference_data: dict[str, Any] = workflow_run_context.get_block_metadata(self.label)
         template_data = workflow_run_context.values.copy()
-        template_data[self.label] = workflow_run_context.get_block_metadata(self.label)
+        if self.label in template_data:
+            current_value = template_data[self.label]
+            if isinstance(current_value, dict):
+                block_reference_data.update(current_value)
+            else:
+                LOG.warning(
+                    f"Parameter {self.label} has a registered reference value, going to overwrite it by block metadata"
+                )
+
+        template_data[self.label] = block_reference_data
+
+        # inject the forloop metadata as global variables
+        if "current_index" in block_reference_data:
+            template_data["current_index"] = block_reference_data["current_index"]
+        if "current_item" in block_reference_data:
+            template_data["current_item"] = block_reference_data["current_item"]
+        if "current_value" in block_reference_data:
+            template_data["current_value"] = block_reference_data["current_value"]
+
         return template.render(template_data)
 
     @classmethod
-    def get_subclasses(cls) -> tuple[type["Block"], ...]:
+    def get_subclasses(cls) -> tuple[type[Block], ...]:
         return tuple(cls.__subclasses__())
 
     @staticmethod
@@ -209,6 +244,52 @@ class Block(BaseModel, abc.ABC):
     ) -> BlockResult:
         pass
 
+    async def _generate_workflow_run_block_description(
+        self, workflow_run_block_id: str, organization_id: str | None = None
+    ) -> None:
+        description = None
+        try:
+            block_data = self.model_dump(
+                exclude={
+                    "workflow_run_block_id",
+                    "organization_id",
+                    "task_id",
+                    "workflow_run_id",
+                    "parent_workflow_run_block_id",
+                    "label",
+                    "status",
+                    "output",
+                    "continue_on_failure",
+                    "failure_reason",
+                    "actions",
+                    "created_at",
+                    "modified_at",
+                },
+                exclude_none=True,
+            )
+            description_generation_prompt = prompt_engine.load_prompt(
+                "generate_workflow_run_block_description",
+                block=block_data,
+            )
+            json_response = await app.SECONDARY_LLM_API_HANDLER(
+                prompt=description_generation_prompt, prompt_name="generate-workflow-run-block-description"
+            )
+            description = json_response.get("summary")
+            LOG.info(
+                "Generated description for the workflow run block",
+                description=description,
+                workflow_run_block_id=workflow_run_block_id,
+            )
+        except Exception as e:
+            LOG.exception("Failed to generate description for the workflow run block", error=e)
+
+        if description:
+            await app.DATABASE.update_workflow_run_block(
+                workflow_run_block_id=workflow_run_block_id,
+                description=description,
+                organization_id=organization_id,
+            )
+
     async def execute_safe(
         self,
         workflow_run_id: str,
@@ -218,7 +299,11 @@ class Block(BaseModel, abc.ABC):
         **kwargs: dict,
     ) -> BlockResult:
         workflow_run_block_id = None
+        engine: RunEngine | None = None
         try:
+            if isinstance(self, BaseTaskBlock):
+                engine = self.engine
+
             workflow_run_block = await app.DATABASE.create_workflow_run_block(
                 workflow_run_id=workflow_run_id,
                 organization_id=organization_id,
@@ -226,58 +311,25 @@ class Block(BaseModel, abc.ABC):
                 label=self.label,
                 block_type=self.block_type,
                 continue_on_failure=self.continue_on_failure,
+                engine=engine,
             )
             workflow_run_block_id = workflow_run_block.workflow_run_block_id
 
-            description = None
-            try:
-                block_data = self.model_dump(
-                    exclude={
-                        "workflow_run_block_id",
-                        "organization_id",
-                        "task_id",
-                        "workflow_run_id",
-                        "parent_workflow_run_block_id",
-                        "label",
-                        "status",
-                        "output",
-                        "continue_on_failure",
-                        "failure_reason",
-                        "actions",
-                        "created_at",
-                        "modified_at",
-                    },
-                    exclude_none=True,
-                )
-                description_generation_prompt = prompt_engine.load_prompt(
-                    "generate_workflow_run_block_description",
-                    block=block_data,
-                )
-                json_response = await app.SECONDARY_LLM_API_HANDLER(
-                    prompt=description_generation_prompt, prompt_name="generate-workflow-run-block-description"
-                )
-                description = json_response.get("summary")
-                LOG.info(
-                    "Generated description for the workflow run block",
-                    description=description,
-                    workflow_run_block_id=workflow_run_block.workflow_run_block_id,
-                )
-            except Exception as e:
-                LOG.exception("Failed to generate description for the workflow run block", error=e)
-
-            if description:
-                workflow_run_block = await app.DATABASE.update_workflow_run_block(
-                    workflow_run_block_id=workflow_run_block.workflow_run_block_id,
-                    description=description,
-                    organization_id=organization_id,
-                )
+            # generate the description for the workflow run block asynchronously
+            asyncio.create_task(self._generate_workflow_run_block_description(workflow_run_block_id, organization_id))
 
             # create a screenshot
             browser_state = app.BROWSER_MANAGER.get_for_workflow_run(workflow_run_id)
             if not browser_state:
                 LOG.warning("No browser state found when creating workflow_run_block", workflow_run_id=workflow_run_id)
             else:
-                screenshot = await browser_state.take_screenshot(full_page=True)
+                screenshot = await browser_state.take_fullpage_screenshot(
+                    use_playwright_fullpage=app.EXPERIMENTATION_PROVIDER.is_feature_enabled_cached(
+                        "ENABLE_PLAYWRIGHT_FULLPAGE",
+                        workflow_run_id,
+                        properties={"organization_id": str(organization_id)},
+                    )
+                )
                 if screenshot:
                     await app.ARTIFACT_MANAGER.create_workflow_run_block_artifact(
                         workflow_run_block=workflow_run_block,
@@ -331,6 +383,7 @@ class BaseTaskBlock(Block):
     task_type: str = TaskType.general
     url: str | None = None
     title: str = ""
+    engine: RunEngine = RunEngine.skyvern_v1
     complete_criterion: str | None = None
     terminate_criterion: str | None = None
     navigation_goal: str | None = None
@@ -346,6 +399,8 @@ class BaseTaskBlock(Block):
     totp_verification_url: str | None = None
     totp_identifier: str | None = None
     cache_actions: bool = False
+    complete_verification: bool = True
+    include_action_history_in_verification: bool = False
 
     def get_all_parameters(
         self,
@@ -536,8 +591,16 @@ class BaseTaskBlock(Block):
                     browser_state = await app.BROWSER_MANAGER.get_or_create_for_workflow_run(
                         workflow_run=workflow_run, url=self.url, browser_session_id=browser_session_id
                     )
+                    # assert that the browser state is not None, otherwise we can't go through typing
+                    assert browser_state is not None
                     # add screenshot artifact for the first task
-                    screenshot = await browser_state.take_screenshot(full_page=True)
+                    screenshot = await browser_state.take_fullpage_screenshot(
+                        use_playwright_fullpage=app.EXPERIMENTATION_PROVIDER.is_feature_enabled_cached(
+                            "ENABLE_PLAYWRIGHT_FULLPAGE",
+                            workflow_run_id,
+                            properties={"organization_id": str(organization_id)},
+                        )
+                    )
                     if screenshot:
                         await app.ARTIFACT_MANAGER.create_workflow_run_block_artifact(
                             workflow_run_block=workflow_run_block,
@@ -594,6 +657,8 @@ class BaseTaskBlock(Block):
                         raise e
 
             try:
+                current_context = skyvern_context.ensure_context()
+                current_context.task_id = task.task_id
                 await app.agent.execute_step(
                     organization=organization,
                     task=task,
@@ -601,6 +666,8 @@ class BaseTaskBlock(Block):
                     task_block=self,
                     browser_session_id=browser_session_id,
                     close_browser_on_completion=browser_session_id is None,
+                    complete_verification=self.complete_verification,
+                    engine=self.engine,
                 )
             except Exception as e:
                 # Make sure the task is marked as failed in the database before raising the exception
@@ -611,6 +678,8 @@ class BaseTaskBlock(Block):
                     failure_reason=str(e),
                 )
                 raise e
+            finally:
+                current_context.task_id = None
 
             # Check task status
             updated_task = await app.DATABASE.get_task(
@@ -900,6 +969,7 @@ class ForLoopBlock(Block):
         workflow_run_context: WorkflowRunContext,
         loop_over_values: list[Any],
         organization_id: str | None = None,
+        browser_session_id: str | None = None,
     ) -> LoopBlockExecutedResult:
         outputs_with_loop_values: list[list[dict[str, Any]]] = []
         block_outputs: list[BlockResult] = []
@@ -915,7 +985,9 @@ class ForLoopBlock(Block):
                 metadata: BlockMetadata = {
                     "current_index": loop_idx,
                     "current_value": loop_over_value,
+                    "current_item": loop_over_value,
                 }
+                workflow_run_context.update_block_metadata(self.label, metadata)
                 workflow_run_context.update_block_metadata(loop_block.label, metadata)
 
                 original_loop_block = loop_block
@@ -926,6 +998,7 @@ class ForLoopBlock(Block):
                     workflow_run_id=workflow_run_id,
                     parent_workflow_run_block_id=workflow_run_block_id,
                     organization_id=organization_id,
+                    browser_session_id=browser_session_id,
                 )
 
                 output_value = (
@@ -1078,6 +1151,7 @@ class ForLoopBlock(Block):
             workflow_run_context=workflow_run_context,
             loop_over_values=loop_over_values,
             organization_id=organization_id,
+            browser_session_id=browser_session_id,
         )
         await self.record_output_parameter_value(
             workflow_run_context, workflow_run_id, loop_executed_result.outputs_with_loop_values
@@ -1172,8 +1246,7 @@ async def wrapper():
         browser_session_id: str | None = None,
         **kwargs: dict,
     ) -> BlockResult:
-        if not settings.ENABLE_CODE_BLOCK:
-            raise DisabledBlockExecutionError("CodeBlock is disabled")
+        await app.AGENT_FUNCTION.validate_code_block(organization_id=organization_id)
 
         # TODO: only support to use code block to manupilate the browser page
         # support browser context in the future
@@ -1185,12 +1258,7 @@ async def wrapper():
             )
             browser_state = await app.PERSISTENT_SESSIONS_MANAGER.get_browser_state(browser_session_id)
             if browser_state:
-                await app.PERSISTENT_SESSIONS_MANAGER.occupy_browser_session(
-                    browser_session_id,
-                    runnable_type="workflow_run",
-                    runnable_id=workflow_run_id,
-                    organization_id=organization_id,
-                )
+                LOG.info("Was occupying session here, but no longer.", browser_session_id=browser_session_id)
         else:
             browser_state = app.BROWSER_MANAGER.get_for_workflow_run(workflow_run_id)
 
@@ -1579,6 +1647,160 @@ class UploadToS3Block(Block):
         )
 
 
+class FileUploadBlock(Block):
+    block_type: Literal[BlockType.FILE_UPLOAD] = BlockType.FILE_UPLOAD
+
+    storage_type: FileStorageType = FileStorageType.S3
+    s3_bucket: str | None = None
+    aws_access_key_id: str | None = None
+    aws_secret_access_key: str | None = None
+    region_name: str | None = None
+    path: str | None = None
+
+    def get_all_parameters(
+        self,
+        workflow_run_id: str,
+    ) -> list[PARAMETER_TYPE]:
+        workflow_run_context = self.get_workflow_run_context(workflow_run_id)
+        parameters = []
+
+        if self.path and workflow_run_context.has_parameter(self.path):
+            parameters.append(workflow_run_context.get_parameter(self.path))
+
+        if self.s3_bucket and workflow_run_context.has_parameter(self.s3_bucket):
+            parameters.append(workflow_run_context.get_parameter(self.s3_bucket))
+
+        if self.aws_access_key_id and workflow_run_context.has_parameter(self.aws_access_key_id):
+            parameters.append(workflow_run_context.get_parameter(self.aws_access_key_id))
+
+        if self.aws_secret_access_key and workflow_run_context.has_parameter(self.aws_secret_access_key):
+            parameters.append(workflow_run_context.get_parameter(self.aws_secret_access_key))
+
+        return parameters
+
+    def format_potential_template_parameters(self, workflow_run_context: WorkflowRunContext) -> None:
+        if self.path:
+            self.path = self.format_block_parameter_template_from_workflow_run_context(self.path, workflow_run_context)
+        if self.s3_bucket:
+            self.s3_bucket = self.format_block_parameter_template_from_workflow_run_context(
+                self.s3_bucket, workflow_run_context
+            )
+        if self.aws_access_key_id:
+            self.aws_access_key_id = self.format_block_parameter_template_from_workflow_run_context(
+                self.aws_access_key_id, workflow_run_context
+            )
+        if self.aws_secret_access_key:
+            self.aws_secret_access_key = self.format_block_parameter_template_from_workflow_run_context(
+                self.aws_secret_access_key, workflow_run_context
+            )
+
+    def _get_s3_uri(self, workflow_run_id: str, path: str) -> str:
+        s3_suffix = f"{workflow_run_id}/{uuid.uuid4()}_{Path(path).name}"
+        if not self.path:
+            return f"s3://{self.s3_bucket}/{s3_suffix}"
+        return f"s3://{self.s3_bucket}/{self.path}/{s3_suffix}"
+
+    async def execute(
+        self,
+        workflow_run_id: str,
+        workflow_run_block_id: str,
+        organization_id: str | None = None,
+        browser_session_id: str | None = None,
+        **kwargs: dict,
+    ) -> BlockResult:
+        # get workflow run context
+        workflow_run_context = self.get_workflow_run_context(workflow_run_id)
+        # get all parameters into a dictionary
+        # data validate before uploading
+        missing_parameters = []
+        if not self.s3_bucket:
+            missing_parameters.append("s3_bucket")
+        if not self.aws_access_key_id:
+            missing_parameters.append("aws_access_key_id")
+        if not self.aws_secret_access_key:
+            missing_parameters.append("aws_secret_access_key")
+
+        if missing_parameters:
+            return await self.build_block_result(
+                success=False,
+                failure_reason=f"Required block values are missing in the FileUploadBlock (label: {self.label}): {', '.join(missing_parameters)}",
+                output_parameter_value=None,
+                status=BlockStatus.failed,
+                workflow_run_block_id=workflow_run_block_id,
+                organization_id=organization_id,
+            )
+
+        try:
+            self.format_potential_template_parameters(workflow_run_context)
+        except Exception as e:
+            return await self.build_block_result(
+                success=False,
+                failure_reason=f"Failed to format jinja template: {str(e)}",
+                output_parameter_value=None,
+                status=BlockStatus.failed,
+                workflow_run_block_id=workflow_run_block_id,
+                organization_id=organization_id,
+            )
+
+        download_files_path = str(get_path_for_workflow_download_directory(workflow_run_id).absolute())
+
+        s3_uris = []
+        try:
+            workflow_run_context = self.get_workflow_run_context(workflow_run_id)
+            actual_aws_access_key_id = (
+                workflow_run_context.get_original_secret_value_or_none(self.aws_access_key_id) or self.aws_access_key_id
+            )
+            actual_aws_secret_access_key = (
+                workflow_run_context.get_original_secret_value_or_none(self.aws_secret_access_key)
+                or self.aws_secret_access_key
+            )
+            client = AsyncAWSClient(
+                aws_access_key_id=actual_aws_access_key_id,
+                aws_secret_access_key=actual_aws_secret_access_key,
+                region_name=self.region_name,
+            )
+            # is the file path a file or a directory?
+            if os.path.isdir(download_files_path):
+                # get all files in the directory, if there are more than 25 files, we will not upload them
+                files = os.listdir(download_files_path)
+                if len(files) > MAX_UPLOAD_FILE_COUNT:
+                    raise ValueError("Too many files in the directory, not uploading")
+                for file in files:
+                    # if the file is a directory, we will not upload it
+                    if os.path.isdir(os.path.join(download_files_path, file)):
+                        LOG.warning("FileUploadBlock: Skipping directory", file=file)
+                        continue
+                    file_path = os.path.join(download_files_path, file)
+                    s3_uri = self._get_s3_uri(workflow_run_id, file_path)
+                    s3_uris.append(s3_uri)
+                    await client.upload_file_from_path(uri=s3_uri, file_path=file_path, raise_exception=True)
+            else:
+                s3_uri = self._get_s3_uri(workflow_run_id, download_files_path)
+                s3_uris.append(s3_uri)
+                await client.upload_file_from_path(uri=s3_uri, file_path=download_files_path, raise_exception=True)
+        except Exception as e:
+            LOG.exception("FileUploadBlock: Failed to upload file to S3", file_path=self.path)
+            return await self.build_block_result(
+                success=False,
+                failure_reason=f"Failed to upload file to S3: {str(e)}",
+                output_parameter_value=None,
+                status=BlockStatus.failed,
+                workflow_run_block_id=workflow_run_block_id,
+                organization_id=organization_id,
+            )
+
+        LOG.info("FileUploadBlock: File(s) uploaded to S3", file_path=self.path)
+        await self.record_output_parameter_value(workflow_run_context, workflow_run_id, s3_uris)
+        return await self.build_block_result(
+            success=True,
+            failure_reason=None,
+            output_parameter_value=s3_uris,
+            status=BlockStatus.completed,
+            workflow_run_block_id=workflow_run_block_id,
+            organization_id=organization_id,
+        )
+
+
 class SendEmailBlock(Block):
     block_type: Literal[BlockType.SEND_EMAIL] = BlockType.SEND_EMAIL
 
@@ -1929,7 +2151,7 @@ class FileParserBlock(Block):
     def validate_file_type(self, file_url_used: str, file_path: str) -> None:
         if self.file_type == FileType.CSV:
             try:
-                with open(file_path, "r") as file:
+                with open(file_path) as file:
                     csv.Sniffer().sniff(file.read(1024))
             except csv.Error as e:
                 raise InvalidFileType(file_url=file_url_used, file_type=self.file_type, error=str(e))
@@ -1978,7 +2200,7 @@ class FileParserBlock(Block):
         self.validate_file_type(self.file_url, file_path)
         # Parse the file into a list of dictionaries where each dictionary represents a row in the file
         parsed_data = []
-        with open(file_path, "r") as file:
+        with open(file_path) as file:
             if self.file_type == FileType.CSV:
                 reader = csv.DictReader(file)
                 for row in reader:
@@ -2227,6 +2449,22 @@ class TaskV2Block(Block):
     ) -> list[PARAMETER_TYPE]:
         return []
 
+    def format_potential_template_parameters(self, workflow_run_context: WorkflowRunContext) -> None:
+        self.prompt = self.format_block_parameter_template_from_workflow_run_context(self.prompt, workflow_run_context)
+        if self.url:
+            self.url = self.format_block_parameter_template_from_workflow_run_context(self.url, workflow_run_context)
+
+        if self.totp_identifier:
+            self.totp_identifier = self.format_block_parameter_template_from_workflow_run_context(
+                self.totp_identifier, workflow_run_context
+            )
+
+        if self.totp_verification_url:
+            self.totp_verification_url = self.format_block_parameter_template_from_workflow_run_context(
+                self.totp_verification_url, workflow_run_context
+            )
+            self.totp_verification_url = prepend_scheme_and_validate_url(self.totp_verification_url)
+
     async def execute(
         self,
         workflow_run_id: str,
@@ -2235,8 +2473,25 @@ class TaskV2Block(Block):
         browser_session_id: str | None = None,
         **kwargs: dict,
     ) -> BlockResult:
-        from skyvern.forge.sdk.services import task_v2_service
         from skyvern.forge.sdk.workflow.models.workflow import WorkflowRunStatus
+        from skyvern.services import task_v2_service
+
+        workflow_run_context = self.get_workflow_run_context(workflow_run_id)
+        try:
+            self.format_potential_template_parameters(workflow_run_context)
+        except Exception as e:
+            output_reason = f"Failed to format jinja template: {str(e)}"
+            await self.record_output_parameter_value(
+                workflow_run_context, workflow_run_id, {"failure_reason": output_reason}
+            )
+            return await self.build_block_result(
+                success=False,
+                failure_reason=f"Failed to format jinja template: {str(e)}",
+                output_parameter_value=None,
+                status=BlockStatus.failed,
+                workflow_run_block_id=workflow_run_block_id,
+                organization_id=organization_id,
+            )
 
         if not self.url:
             browser_state = app.BROWSER_MANAGER.get_for_workflow_run(workflow_run_id)
@@ -2256,43 +2511,79 @@ class TaskV2Block(Block):
         workflow_run = await app.DATABASE.get_workflow_run(workflow_run_id, organization_id)
         if not workflow_run:
             raise ValueError(f"WorkflowRun not found {workflow_run_id} when running TaskV2Block")
-        task_v2 = await task_v2_service.initialize_task_v2(
-            organization,
-            user_prompt=self.prompt,
-            user_url=self.url,
-            parent_workflow_run_id=workflow_run_id,
-            proxy_location=workflow_run.proxy_location,
-        )
-        await app.DATABASE.update_task_v2(
-            task_v2.observer_cruise_id, status=TaskV2Status.queued, organization_id=organization_id
-        )
-        if task_v2.workflow_run_id:
-            await app.DATABASE.update_workflow_run(
-                workflow_run_id=task_v2.workflow_run_id,
-                status=WorkflowRunStatus.queued,
+        try:
+            task_v2 = await task_v2_service.initialize_task_v2(
+                organization=organization,
+                user_prompt=self.prompt,
+                user_url=self.url,
+                parent_workflow_run_id=workflow_run_id,
+                proxy_location=workflow_run.proxy_location,
+                totp_identifier=self.totp_identifier,
+                totp_verification_url=self.totp_verification_url,
+                max_screenshot_scrolling_times=workflow_run.max_screenshot_scrolling_times,
             )
-            await app.DATABASE.update_workflow_run_block(
-                workflow_run_block_id=workflow_run_block_id,
-                organization_id=organization_id,
-                block_workflow_run_id=task_v2.workflow_run_id,
+            await app.DATABASE.update_task_v2(
+                task_v2.observer_cruise_id, status=TaskV2Status.queued, organization_id=organization_id
             )
+            if task_v2.workflow_run_id:
+                await app.DATABASE.update_workflow_run(
+                    workflow_run_id=task_v2.workflow_run_id,
+                    status=WorkflowRunStatus.queued,
+                )
+                await app.DATABASE.update_workflow_run_block(
+                    workflow_run_block_id=workflow_run_block_id,
+                    organization_id=organization_id,
+                    block_workflow_run_id=task_v2.workflow_run_id,
+                )
 
-        task_v2 = await task_v2_service.run_task_v2(
-            organization=organization,
-            task_v2_id=task_v2.observer_cruise_id,
-            request_id=None,
-            max_steps_override=self.max_steps,
-            browser_session_id=browser_session_id,
-        )
+            task_v2 = await task_v2_service.run_task_v2(
+                organization=organization,
+                task_v2_id=task_v2.observer_cruise_id,
+                request_id=None,
+                max_steps_override=self.max_steps,
+                browser_session_id=browser_session_id,
+            )
+        finally:
+            skyvern_context.set(
+                skyvern_context.SkyvernContext(
+                    organization_id=organization_id,
+                    organization_name=organization.organization_name,
+                    workflow_id=workflow_run.workflow_id,
+                    workflow_permanent_id=workflow_run.workflow_permanent_id,
+                    workflow_run_id=workflow_run_id,
+                    browser_session_id=browser_session_id,
+                    max_screenshot_scrolling_times=workflow_run.max_screenshot_scrolling_times,
+                )
+            )
         result_dict = None
         if task_v2:
             result_dict = task_v2.output
 
+        # Determine block status from task status using module-level mapping
+        block_status = TASKV2_TO_BLOCK_STATUS.get(task_v2.status, BlockStatus.failed)
+        success = task_v2.status == TaskV2Status.completed
+        failure_reason: str | None = None
+        task_v2_workflow_run_id = task_v2.workflow_run_id
+        if task_v2_workflow_run_id:
+            task_v2_workflow_run = await app.DATABASE.get_workflow_run(task_v2_workflow_run_id, organization_id)
+            if task_v2_workflow_run:
+                failure_reason = task_v2_workflow_run.failure_reason
+
+        # If continue_on_failure is True, we treat the block as successful even if the task failed
+        # This allows the workflow to continue execution despite this block's failure
+        task_v2_output = {
+            "task_id": task_v2.observer_cruise_id,
+            "status": task_v2.status,
+            "summary": task_v2.summary,
+            "extracted_information": result_dict,
+            "failure_reason": failure_reason,
+        }
+        await self.record_output_parameter_value(workflow_run_context, workflow_run_id, task_v2_output)
         return await self.build_block_result(
-            success=True,
-            failure_reason=None,
+            success=success or self.continue_on_failure,
+            failure_reason=failure_reason,
             output_parameter_value=result_dict,
-            status=BlockStatus.completed,
+            status=block_status,
             workflow_run_block_id=workflow_run_block_id,
             organization_id=organization_id,
         )
@@ -2317,5 +2608,6 @@ BlockSubclasses = Union[
     FileDownloadBlock,
     UrlBlock,
     TaskV2Block,
+    FileUploadBlock,
 ]
 BlockTypeVar = Annotated[BlockSubclasses, Field(discriminator="block_type")]
